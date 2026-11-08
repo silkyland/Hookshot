@@ -2967,11 +2967,12 @@ void replay_thread_main() {
             q_busy = true;
         }
         if (blocked_n.load()) {   // (stopped ones: on now when another thread waits for the replay, or stopped too long)
+            std::lock_guard order(sync_order_mu);   // (drain's qruns walk is the order's state: sync_order_mu, before replay_mu)
             if (!have && drain_waiters.load() > 0) drain(2);   // (the jobs before its wait done)
             else if (std::chrono::steady_clock::now() >= blocked_since + std::chrono::milliseconds(hold_ms())) drain(3);
         }
         if (!have) {
-            update_blocked();
+            { std::lock_guard order(sync_order_mu); update_blocked(); }
             std::lock_guard lk(q_mu);
             q_busy = false;
             if (q_jobs.empty() && !blocked_n.load()) q_idle.notify_all();

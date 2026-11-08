@@ -86,7 +86,12 @@ class Nup:
         return self.strings[off:off + n].decode("utf-8")
 
     def walk(self, d, prefix=""):
-        """(relative path, file record) for every file under dir d."""
+        """(relative path, file record) for every file under dir d.
+        A title record can point at no directory at all (0xFFFFFFFF marks an absent
+        part, e.g. an empty base title next to a whole-game update): that walks to
+        nothing rather than indexing past the dir table."""
+        if not isinstance(d, int) or not 0 <= d < self.nd:
+            return
         no, nl, first, n = self.dirs[d]
         for k in self.kids[first:first + n]:
             if k < self.nd:
@@ -173,9 +178,16 @@ class Nup:
         return b.getvalue() if n is None else b.getvalue()[:n]
 
 
+def title_has_files(nup, t):
+    """Whether a title record holds any files — an empty base next to a
+    whole-game update is a placeholder and must not win default selection."""
+    return any(True for _ in nup.walk(t["exefs"])) or any(True for _ in nup.walk(t["romfs"]))
+
+
 def pick_title(nup, want):
     if want is None:
-        return max(nup.titles, key=lambda t: t["version"])   # (the newest: the update over the base)
+        titles = [t for t in nup.titles if title_has_files(nup, t)] or nup.titles
+        return max(titles, key=lambda t: t["version"])   # (the newest with content: the update over the base)
     for t in nup.titles:
         if str(t["index"]) == want or str(t["version"]) == want or "%016x" % t["id"] == want.lower():
             return t

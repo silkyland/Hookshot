@@ -598,6 +598,9 @@ PixelFormat nvn_pixel_format(int nvn_format);
 /// The queue's state as the recordings set it (one queue; it carries across submits, as the console's does).
 struct NvnState {
     nvn_prog prog{};   // the bound program, copied at the bind (the game can set new shaders on the object later)
+    // (pokopia) the NVN stage id of each prog.sd entry, from its control section (+0x56; 0xff: unreadable). Programs
+    // can be bound per stage (a vertex program and a fragment program apart): prog is then the stages bound so far
+    uint8_t prog_stage[6]{};
     bool has_prog = false;
     // per NVN stage (0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute)
     nvn_p_bind_buf ubo[6][16]{}, ssbo[6][16]{};

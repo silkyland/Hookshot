@@ -13,6 +13,10 @@ constexpr int kNvnStages = 8;
 
 struct NvnState {
     nvn_prog prog{};
+    // (pokopia) the NVN stage id of each prog.sd entry, from its control section (+0x56; 0xff: unreadable).
+    // Programs can be bound per stage (a vertex program and a fragment program apart): prog is then the stages
+    // bound so far. As gpu/render/rx_internal.h's NvnState.
+    uint8_t prog_stage[6]{};
     bool has_prog = false;
     nvn_p_bind_buf ubo[kNvnStages][16]{}, ssbo[kNvnStages][16]{};
     uint64_t tex[kNvnStages][128]{}, samp[kNvnStages][128]{}, img[kNvnStages][32]{};

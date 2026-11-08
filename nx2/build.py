@@ -523,7 +523,9 @@ def main():
         t = time.time()
         # (--export-dynamic-symbol: the window's state, which the Vulkan back end's own Win32 calls read by name)
         r = subprocess.run([cc] + target() + ["-fuse-ld=lld", "-o", exe, "-Wl,-Map=" + exe + ".map", "-Wl,--gc-sections",
-                                              "-Wl,--export-dynamic-symbol=hos_posix_*", "@" + rsp] + HOT_ORDER() +
+                                              "-Wl,--export-dynamic-symbol=hos_posix_*",
+                                              # (pokopia) gpu/vk/vk_replay.cpp's fence sync reads the game's submit count
+                                              "-Wl,--export-dynamic-symbol=rx_nvn_pushed", "@" + rsp] + HOT_ORDER() +
                            (["-fprofile-instr-generate"] if PGO == "gen" else []) +
                            (FFMPEG_LX[1] if FFMPEG_LX else []) + HOST_LIBS,
                            capture_output=True, text=True)

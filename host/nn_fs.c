@@ -125,24 +125,36 @@ static void user_mount(const char *name, const char *sub) {
     mount(name, root, 1);
 }
 
+/* The save-data subfolder for an account uid (ARG(n) points at the Uid). OoT keeps its historical
+   save/<uid>; every other title gets the program id inside the path — one synthetic uid serves all
+   games, so without it two titles' save data would share (and overwrite) one directory. */
+static void save_sub(char *sub, size_t cap, int uid_arg) {
+    const uint64_t hi = (uint64_t)G64(uid_arg + 8), lo = (uint64_t)G64(uid_arg);
+    if (hos_game_title() == HOS_TITLE_OOT)
+        snprintf(sub, cap, "save\\%016llx%016llx", (unsigned long long)hi, (unsigned long long)lo);
+    else
+        snprintf(sub, cap, "save\\%016llx%016llx\\%016llx%016llx",
+                 (unsigned long long)(hos_program_id >> 32), (unsigned long long)(hos_program_id & 0xffffffffULL),
+                 (unsigned long long)hi, (unsigned long long)lo);
+}
 /* nn::fs::IsSaveDataExisting(ApplicationId, account::Uid const&) -> bool */
 HLE(_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE) {
-    char root[MAX_PATH];
-    snprintf(root, sizeof root, "%s\\save\\%016llx%016llx", hos_user_dir, (unsigned long long)G64(ARG(1) + 8),
-             (unsigned long long)G64(ARG(1)));
+    char sub[96], root[MAX_PATH];
+    save_sub(sub, sizeof sub, 1);
+    snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
     RET(GetFileAttributesA(root) != INVALID_FILE_ATTRIBUTES);
 }
 /* MountSaveData(char const*, account::Uid const&) */
 HLE(_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE) {
-    char sub[64];
-    snprintf(sub, sizeof sub, "save\\%016llx%016llx", (unsigned long long)G64(ARG(1) + 8), (unsigned long long)G64(ARG(1)));
+    char sub[96];
+    save_sub(sub, sizeof sub, 1);
     user_mount(gstr(ARG(0)), sub);
     RET(0);
 }
 /* MountSaveDataReadOnly(char const*, ApplicationId, account::Uid const&) */
 HLE(_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE) {
-    char sub[64];
-    snprintf(sub, sizeof sub, "save\\%016llx%016llx", (unsigned long long)G64(ARG(2) + 8), (unsigned long long)G64(ARG(2)));
+    char sub[96];
+    save_sub(sub, sizeof sub, 2);
     user_mount(gstr(ARG(0)), sub);
     RET(0);
 }
@@ -516,4 +528,18 @@ HLE(_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE) {
     free_handle(ARG(0));
     free(dh->extras);
     free(dh);
+}
+/* (pokopia) GetFreeSpaceSize(long* out, const char* path): the SDK's own wrapper does fs-service IPC and
+   nn::diag-aborts on the empty reply (TaskMgr died here right after the save mount). Report a generous
+   host-disk-free figure for the mounted root instead: the save partition's real usage is ours to decide. */
+HLE(_ZN2nn2fs16GetFreeSpaceSizeEPlPKc) {
+    (void)gstr(ARG(1));
+    G64(ARG(0)) = 0x4000000000LL;   /* 256 GiB: the game only checks there is room */
+    RET(0);
+}
+/* GetBlockSize(int* out, const char* path): allocation block of the backing store */
+HLE(_ZN2nn2fs12GetBlockSizeEPiPKc) {
+    (void)gstr(ARG(1));
+    G32(ARG(0)) = 0x1000;
+    RET(0);
 }

@@ -1541,7 +1541,11 @@ const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t c
     const Code* stage_code[8]{};
     for (const Code& c : cs)
         if (!c.header_only) stage_code[c.stage] = &c;
-    if (compute ? !stage_code[5] : !stage_code[0]) return nullptr;
+    if (compute ? !stage_code[5] : !stage_code[0]) {
+        static int miss_logged;
+        if (miss_logged++ < 20) log_program_stages(s, compute ? "compute without stage 5" : "graphics without stage 0");
+        return nullptr;
+    }
     if (!compute && (stage_code[2] || stage_code[3] || stage_code[4])) {   // (geometry/tessellation: not translated)
         static int logged;
         if (logged++ < 40) log_program_stages(s, "dropped stages");

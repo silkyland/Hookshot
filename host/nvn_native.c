@@ -188,7 +188,23 @@ static const int devinfo[] = {
 };
 NV(nvnDeviceGetInteger) {
     const unsigned w = U32(1);
-    if (w >= sizeof devinfo / sizeof *devinfo) die("device property %#x", w);
+    if (w >= sizeof devinfo / sizeof *devinfo) {
+        /* A property id past the table is a newer SDK's: OoT's diagnostic stays fatal, other titles log
+           and answer 0 so bring-up can collect the queried set (HOS_NVN_DEVINFO_LOG names them too) */
+        static int lenient = -1;
+        if (lenient < 0) lenient = hos_game_title() != HOS_TITLE_OOT || getenv("HOS_NVN_DEVINFO_LENIENT") != NULL;
+        if (!lenient) die("device property %#x", w);
+        static struct { unsigned w; } seen[64];
+        static volatile LONG nseen;
+        static SRWLOCK lock = SRWLOCK_INIT;
+        AcquireSRWLockExclusive(&lock);
+        LONG i;
+        for (i = 0; i < nseen && seen[i].w != w; i++) {}
+        if (i == nseen && nseen < 64) { seen[nseen++].w = w; hos_log("nvn: device property %#x is past the table: answered 0", w); }
+        ReleaseSRWLockExclusive(&lock);
+        *(int *)P(2) = 0;
+        return;
+    }
     static int devinfo_log = -1;
     if (devinfo_log < 0) devinfo_log = getenv("HOS_NVN_DEVINFO_LOG") != NULL;
     if (devinfo_log) hos_log("nvn: nvnDeviceGetInteger(%u) -> %d", w, devinfo[w]);
@@ -687,7 +703,16 @@ NV(nvnTextureViewSetSwizzle) {
     for (int i = 0; i < 4; i++) v->swz[i] = (uint8_t)U32(i + 1);
 }
 NV(nvnTextureViewSetDepthStencilMode) {
-    if (I(1) != NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH) die("stencil-plane texture view sampling");
+    /* Which plane of a depth-stencil texture the view samples (DEPTH=0, STENCIL=1). Stored on the view;
+       the Vulkan side still binds the depth aspect for both until stencil sampling lands — a stencil
+       view reads depth data meanwhile (approximation, logged once per mode). */
+    nvn_view *v = VW(P(0));
+    v->set_ds = 1, v->ds_mode = (uint8_t)I(1);
+    if (v->ds_mode != NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH) {
+        static int told[8];
+        if (v->ds_mode < 8 && !told[v->ds_mode]++)
+            hos_log("nvn: depth-stencil view mode %u (stencil-plane sampling approximated as depth)", v->ds_mode);
+    }
 }
 NV(nvnTextureViewGetLevels) { const nvn_view *v = CVW(P(0)); *(int *)P(1) = v->base_level; *(int *)P(2) = v->nlevels; RET(v->set_levels); }
 NV(nvnTextureViewGetLayers) { const nvn_view *v = CVW(P(0)); *(int *)P(1) = v->min_layer; *(int *)P(2) = v->nlayers; RET(v->set_layers); }
@@ -1481,6 +1506,13 @@ NV(nvnCommandBufferWaitEvent) {
     if (!e) return;
     nvn_p_wait_event *w = REC(CB(P(0)), NOP_WAIT_EVENT, nvn_p_wait_event);
     w->gpu = e->gpu, w->mode = U32(2), w->value = U32(3);
+}
+/* (pokopia) nvnCommandBufferFenceSync(cmdbuf, sync): a fence signal inside the recorded stream. Replayed as
+   "this submit's work is done" — the fence is every submit pushed at replay time, an over-approximation of the
+   console's mid-stream signal that can only wait longer, never read early. */
+NV(nvnCommandBufferFenceSync) {
+    nvn_p_fence_sync *f = REC(CB(P(0)), NOP_FENCE_SYNC, nvn_p_fence_sync);
+    f->sync = P(1);
 }
 NV(nvnCommandBufferWaitSync) {
     static volatile LONG n;
@@ -2648,6 +2680,7 @@ static const nvn_impl impls[] = {
     {"nvnCommandBufferSignalEvent", n_nvnCommandBufferSignalEvent},
     {"nvnCommandBufferWaitEvent", n_nvnCommandBufferWaitEvent},
     {"nvnCommandBufferWaitSync", n_nvnCommandBufferWaitSync},
+    {"nvnCommandBufferFenceSync", n_nvnCommandBufferFenceSync},
     {"nvnQueueWaitSync", n_nvnQueueWaitSync},
     {"nvnCommandBufferPushComputeConstants", n_nvnCommandBufferPushComputeConstants},
     {"nvnCommandBufferResetCounter", n_nvnCommandBufferResetCounter},

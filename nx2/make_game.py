@@ -25,14 +25,11 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)   # (python -I leaves the script folder off)
+import titles   # noqa: E402  (per-title configuration: nx2/titles/)
 PY = [sys.executable, "-I", "-u", "-X", "utf8"]   # (utf8: every step's output in UTF-8 whatever the console's code page: lift.py crashed on a letter, #180)   # (-u: the steps' output as it comes, not in 8 KB blocks minutes apart)
-BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile were made from)
 LINUX = os.name != "nt"
 BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
-LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
-             ("it", "Italian"), ("es", "Spanish (Spain)"), ("es-419", "Spanish (Latin America)"), ("pt-BR", "Portuguese (Brazil)"), ("nl", "Dutch"),
-             ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
-             ("zh-Hant", "Chinese (Traditional)")]
 
 
 def no_throttle(handle=None):
@@ -123,10 +120,12 @@ def check_modules(exefs):
                      "Hookshot developers." % (name, head.hex()))
 
 
-def check_supported_build(exefs):
+def check_supported_build(exefs, title=None):
+    """The dump's main module is a build this title's tools support (every build path, not only --check)"""
     bid = build_id(os.path.join(exefs, "main"))
-    if not bid.startswith(BUILD_ID):
-        fail("This is build %s. Hookshot supports build %s." % (bid[:8], BUILD_ID))
+    name, t = title or titles.for_exefs(exefs)
+    if not bid.startswith(t.BUILD_ID):
+        fail("This is build %s. Hookshot's %s support is build %s." % (bid[:8], name, t.BUILD_ID))
 
 
 def check_cache_paths(out, paths):
@@ -156,10 +155,13 @@ def check(a, work):
         shutil.rmtree(probe, ignore_errors=True)
     else:
         bid = build_id(os.path.join(a.exefs, "main"))
-    if bid.startswith(BUILD_ID):
-        say("check", "ok", "This is the version Hookshot supports (build %s)." % bid[:8])
+    name, t = titles.for_build_id(bid) if bid else (None, None)
+    if name is None:
+        say("check", "bad", "This is build %s. Hookshot supports: %s." % (bid[:8], titles.known_builds()))
+    elif bid.startswith(t.BUILD_ID):
+        say("check", "ok", "This is the %s version Hookshot supports (build %s)." % (name, bid[:8]))
     else:
-        say("check", "bad", "This is build %s. Hookshot supports build %s." % (bid[:8], BUILD_ID))
+        say("check", "bad", "This is build %s. Hookshot's %s support is build %s." % (bid[:8], name, t.BUILD_ID))
 
 
 def visual_studio_environment():
@@ -415,13 +417,15 @@ def drop_stale_objects(work):
         f.write(stamp + chr(10))
 
 
-def seed_pipelines(out):
+def seed_pipelines(out, title):
     """The pipelines recorded on the development PC (hookshot_pipelines_seed.bin in the tools: program keys and draw states, no game
     code), as the game folder's list, so its first start builds them before the title, as TotK Recomp's shipped shader list does,
     instead of compiling each when it is first drawn (the stutter of a first visit). Each release ships the list its own build
     made: the file's first 8 bytes are that build's stamp, and a list the folder has from the same build is kept (it grows as
-    the player plays)"""
-    seed = os.path.join(ROOT, "hookshot_pipelines_seed.bin")
+    the player plays). Per title: a seed belongs to the game it was recorded on."""
+    if not title.PIPELINES_SEED:
+        return
+    seed = os.path.join(ROOT, title.PIPELINES_SEED)
     dst = os.path.join(out, "hookshot_pipelines.bin")
     if not os.path.isfile(seed):
         return
@@ -437,13 +441,13 @@ def seed_pipelines(out):
     print("the shipped pipeline list: %d KB, built before the first title" % (os.path.getsize(seed) >> 10), flush=True)
 
 
-def folder_language(out):
+def folder_language(out, languages):
     """the language a game folder was built in: the code line of its language.txt"""
     try:
         with open(os.path.join(out, "language.txt"), encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line and not line.startswith("#") and any(line == code for code, _ in LANGUAGES):
+                if line and not line.startswith("#") and any(line == code for code, _ in languages):
                     return line
     except OSError:
         pass
@@ -500,7 +504,8 @@ def main():
                    if LINUX else os.path.join(os.environ.get("LOCALAPPDATA", ROOT), "HookshotBuilder"))
     # (HOOKSHOT_JOBS: fewer compilers on a PC short of memory; the AppImage's builds pass no --jobs)
     p.add_argument("--jobs", type=int, default=int(os.environ.get("HOOKSHOT_JOBS") or 0) or default_jobs())
-    p.add_argument("--language", default="en-US", help="the game's language: a code from LANGUAGES, written to language.txt")
+    p.add_argument("--language", default="en-US", help="the game's language: a code from the title's list, written to language.txt")
+    p.add_argument("--title", help="the game this dump is (default: read from the dump's build id; %s)" % ", ".join(sorted(titles.TITLES)))
     p.add_argument("--check", action="store_true")
     p.add_argument("--update", help="a game folder built before: built again from the game files it keeps (the game's update offer)")
     a = p.parse_args()
@@ -513,7 +518,6 @@ def main():
         return check(a, a.work)
     if a.update:
         a.out = a.update
-        a.language = folder_language(a.update) or a.language
     if not a.out or not (a.update or a.nup or (a.romfs and a.exefs)):
         fail("needs --out, and --nup or --romfs with --exefs")
     out = os.path.abspath(a.out)
@@ -580,17 +584,27 @@ def main():
         shutil.rmtree(kept, ignore_errors=True)
         shutil.copytree(exefs, kept)
     check_supported_build(exefs)
+    title_name, title = titles.resolve(a.title, exefs, work)
+    if a.update:
+        a.language = folder_language(out, title.LANGUAGES) or a.language
+    print("title: %s (build %s…)" % (title_name, build_id(os.path.join(exefs, "main"))[:8]), flush=True)
 
-    # (made once on the development PC: lists of addresses and counts, no game code)
+    # (made once on the development PC: lists of addresses and counts, no game code — per title, never across titles)
+    seed_dir = os.path.join(ROOT, "work", title.SEED_SUBDIR)
     for name in ("hot_funcs.txt", "hot_order.txt", "hookshot_pieces.prof", "hookshot.res"):
-        src = os.path.join(ROOT, "work", name)
-        if os.path.exists(src):
-            shutil.copy2(src, os.path.join(work, name))
+        src = os.path.join(seed_dir, name)
+        dst = os.path.join(work, name)
+        if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dst):
+            shutil.copy2(src, dst)
     os.makedirs(os.path.join(work, "image"), exist_ok=True)
-    src = os.path.join(ROOT, "work", "image", "chunks.txt")   # (where the lifted code's files begin: addresses)
-    if os.path.exists(src):
-        shutil.copy2(src, os.path.join(work, "image", "chunks.txt"))
-    env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1"}
+    src = os.path.join(seed_dir, "image", "chunks.txt")   # (where the lifted code's files begin: addresses)
+    dst = os.path.join(work, "image", "chunks.txt")
+    if os.path.exists(src) and os.path.abspath(src) != os.path.abspath(dst):
+        shutil.copy2(src, dst)
+    with open(os.path.join(work, "title"), "w") as f:
+        f.write(title_name + "\n")
+    env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1",
+           "A64_HOT_CHUNK": "1", "HOOKSHOT_TITLE": title_name}
     if os.path.exists(os.path.join(work, "hot_funcs.txt")):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "hookshot_pieces.prof")) and profile_readable(os.path.join(work, "hookshot_pieces.prof")):
@@ -627,11 +641,11 @@ def main():
     # as it meets them: not worth stopping a finished build for
     if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
-    seed_pipelines(out)
+    seed_pipelines(out, title)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
-        f.writelines("# %-8s %s\n" % l for l in LANGUAGES)
+        f.writelines("# %-8s %s\n" % l for l in title.LANGUAGES)
     # (what the game's update offer reads, host/hos_update.c: which release these tools are, and where the builder that made the folder is)
     version = os.path.join(ROOT, "version.txt")
     if os.path.isfile(version):

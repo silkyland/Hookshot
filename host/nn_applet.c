@@ -16,14 +16,33 @@ HLE(_ZN2nn2oe17FinishStartupLogoEv) { hos_log("oe: startup logo finished"); }
 /* GetDesiredLanguage() -> settings::LanguageCode (char[8]) by value: the language the game shows. HOS_LANGUAGE, or language.txt
    beside the exe: its first line that is not blank or a comment. The file is written on the first start, with the choices: the 16
    languages in romfs/Mals. After SkyboundTotk PR 16 by sardigital. */
-static const struct { const char *code, *name; } languages[] = {
+typedef struct { const char *code, *name; } HosLanguage;
+static const HosLanguage oot_languages[] = {
     {"en-US", "English (US)"},       {"en-GB", "English (UK)"},       {"fr", "French (France)"},     {"fr-CA", "French (Canada)"},
     {"de", "German"},                {"it", "Italian"},               {"es", "Spanish (Spain)"},     {"es-419", "Spanish (Latin America)"},
     {"pt-BR", "Portuguese (Brazil)"}, {"nl", "Dutch"},                {"pl", "Polish"},              {"ru", "Russian"},
     {"ja", "Japanese"},              {"ko", "Korean"},                {"zh-Hans", "Chinese (Simplified)"}, {"zh-Hant", "Chinese (Traditional)"},
 };
+/* Pokopia shows its own language picker on first boot (nxnative); the oe answer only seeds it. Same Nintendo set
+   for now — verify against the game's own list at bring-up. */
+static const HosLanguage pokopia_languages[] = {
+    {"en-US", "English (US)"},       {"en-GB", "English (UK)"},       {"fr", "French (France)"},     {"fr-CA", "French (Canada)"},
+    {"de", "German"},                {"it", "Italian"},               {"es", "Spanish (Spain)"},     {"es-419", "Spanish (Latin America)"},
+    {"pt-BR", "Portuguese (Brazil)"}, {"nl", "Dutch"},                {"pl", "Polish"},              {"ru", "Russian"},
+    {"ja", "Japanese"},              {"ko", "Korean"},                {"zh-Hans", "Chinese (Simplified)"}, {"zh-Hant", "Chinese (Traditional)"},
+};
+static const HosLanguage *title_languages(size_t *n) {
+    if (hos_game_title() == HOS_TITLE_POKOPIA) {
+        *n = sizeof pokopia_languages / sizeof *pokopia_languages;
+        return pokopia_languages;
+    }
+    *n = sizeof oot_languages / sizeof *oot_languages;
+    return oot_languages;
+}
 static const char *desired_language(void) {
     static char lang[8];
+    size_t nl;
+    const HosLanguage *languages = title_languages(&nl);
     if (lang[0]) return lang;
     char want[32] = "";
     const char *from = "the default";
@@ -54,7 +73,7 @@ static const char *desired_language(void) {
                 snprintf(code, sizeof code, "%s", p);
                 code[strcspn(code, " \t\r\n")] = 0;
                 int known = 0;
-                for (size_t i = 0; i < sizeof languages / sizeof *languages; i++)
+                for (size_t i = 0; i < nl; i++)
                     if (!_stricmp(code, languages[i].code)) snprintf(code, sizeof code, "%s", languages[i].code), known = 1;
                 if (!known) continue;
                 snprintf(want, sizeof want, "%s", code);
@@ -64,14 +83,14 @@ static const char *desired_language(void) {
             fclose(f);
         } else if ((f = fopen(path, "w")) != NULL) {
             fputs("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\nen-US\n\n", f);
-            for (size_t i = 0; i < sizeof languages / sizeof *languages; i++) fprintf(f, "# %-8s %s\n", languages[i].code, languages[i].name);
+            for (size_t i = 0; i < nl; i++) fprintf(f, "# %-8s %s\n", languages[i].code, languages[i].name);
             fclose(f);
         }
     }
     want[strcspn(want, " \t\r\n")] = 0;
     snprintf(lang, sizeof lang, "en-US");
     int found = 0;
-    for (size_t i = 0; want[0] && i < sizeof languages / sizeof *languages; i++)
+    for (size_t i = 0; want[0] && i < nl; i++)
         if (!_stricmp(want, languages[i].code)) snprintf(lang, sizeof lang, "%s", languages[i].code), found = 1;   /* (HOS_LANGUAGE=pt-br too, as language.txt) */
     if (want[0] && !found) hos_log("oe: language \"%s\" (%s) is not one the game has: English (US)", want, from);
     else hos_log("oe: language %s (%s)", lang, from);
@@ -259,6 +278,72 @@ HLE(_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_) {
     RET(0);
 }
 HLE(_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_) { RET(0); }
+
+/* days since 1970-01-01 (Howard Hinnant's days_from_civil), the epoch nn::time::DateToDays counts from */
+static int64_t date_to_days(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097LL + (int)doe - 719468;
+}
+/* DateToDays(year, month, day) -> days */
+HLE(_ZN2nn4time10DateToDaysEiii) { RET((uint64_t)date_to_days((int)ARG(0), (unsigned)ARG(1), (unsigned)ARG(2))); }
+/* GetDayOfWeek(year, month, day) -> nn::time::DayOfWeek (Sunday = 0); 1970-01-01 was a Thursday */
+HLE(_ZN2nn4time12GetDayOfWeekEiii) {
+    int64_t days = date_to_days((int)ARG(0), (unsigned)ARG(1), (unsigned)ARG(2)) + 4;
+    RET((uint64_t)((days % 7 + 7) % 7));
+}
+/* ToPosixTime(int* count, PosixTime* out, int n, CalendarTime const&): local calendar -> seconds (host mktime) */
+static void calendar_to_posix(Ctx *c) {
+    uint8_t ct[8];
+    memcpy(ct, GP(ARG(3)), 8);
+    struct tm tmv = {0};
+    int16_t year;
+    memcpy(&year, ct, 2);
+    tmv.tm_year = year - 1900; tmv.tm_mon = ct[2] - 1; tmv.tm_mday = ct[3];
+    tmv.tm_hour = ct[4]; tmv.tm_min = ct[5]; tmv.tm_sec = ct[6];
+    tmv.tm_isdst = -1;
+    const int64_t t = (int64_t)mktime(&tmv);
+    const int n = (int)ARG(2);
+    if (ARG(0)) G32(ARG(0)) = n > 0 ? 1 : 0;
+    if (n > 0 && ARG(1)) G64(ARG(1)) = (uint64_t)t;
+    RET(0);
+}
+HLE(_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE) { calendar_to_posix(c); }
+HLE(_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeERKNS0_12TimeZoneRuleE) { calendar_to_posix(c); }
+/* GetDeviceLocationName(LocationName*): char[0x24], the host's zone abbreviation */
+HLE(_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE) {
+    memset(GP(ARG(0)), 0, 0x24);
+    tzset();
+    const char *zn = tzname[0] && *tzname[0] ? tzname[0] : "UTC";
+    memcpy(GP(ARG(0)), zn, strlen(zn) < 0x24 ? strlen(zn) : 0x23);
+    RET(0);
+}
+
+/* ---- platform services the game probes at boot: offline answers --------------------------------- */
+HLE(_ZN2nn2ro12ProtectRelroEPKvS2_S2_S2_S2_) { RET(0); }
+HLE(_ZN2nn3aoc17CountAddOnContentEv) { RET(0); }
+HLE(_ZN2nn6socket10InitializeERKNS0_6ConfigE) { RET(0); }
+HLE(_ZN2nn6socket10InitializeEPvmmi) { RET(0); }
+HLE(_ZN2nn6socket8FinalizeEv) { RET(0); }
+HLE(_ZN2nn6socket8internal10InitializeEi) { RET(0); }
+HLE(_ZN2nn3ssl10InitializeEv) { RET(0); }
+HLE(_ZN2nn3ssl8FinalizeEv) { RET(0); }
+HLE(_ZN2nn4nifm10InitializeEv) { RET(0); }
+HLE(_ZN2nn4nifm8FinalizeEv) { RET(0); }
+HLE(_ZN2nn4bcat10InitializeEv) { RET(0); }
+void hos_system_event_init(uint64_t key, int autoclear);   /* nn_os_sync.c */
+/* GetFriendInvitationNotificationEvent() -> Event*: a quiet event that never signals (no friends service) */
+HLE(_ZN2nn7friends36GetFriendInvitationNotificationEventEv) {
+    static uint64_t ev;
+    if (!ev) {
+        ev = hos_sys_alloc(0x10, 8);
+        hos_system_event_init(ev, 1);
+    }
+    RET(ev);
+}
 
 /* ---- nn::pl: system shared fonts. We have none; report an empty one, loaded. ------------------------------------ */
 static uint64_t empty_font;

@@ -603,6 +603,24 @@ bool buf_unchanged(int32_t stage, int32_t index, uint64_t addr, uint64_t size, i
     return stage == nstage && index == nindex && addr == naddr && size == nsize;
 }
 
+// (pokopia) the NVN stage id of a stage's control section (+0x56), by its guest address: a program bound per stage
+// (Pokopia binds its vertex and fragment programs apart, the bind's stage mask saying which of its stages replace
+// the bound ones) is merged into the bound set. As gpu/render/rx_nvn.cpp's nvn_stage_id.
+uint8_t nvn_stage_id(uint64_t control) {
+    if (!control) return 0xff;
+    static std::unordered_map<uint64_t, uint8_t> by_ctl;
+    static std::mutex mu;
+    std::lock_guard lk(mu);
+    auto it = by_ctl.find(control);
+    if (it != by_ctl.end()) return it->second;
+    uint8_t st = 0xff;
+    uint16_t v = 0;
+    if (host->gpu_read(control + 0x56, &v, 2)) st = (uint8_t)v;
+    if (by_ctl.size() > 65536) by_ctl.clear();
+    by_ctl[control] = st;
+    return st;
+}
+
 void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* end = nullptr) {
     const Mode mode = rmode;
     const bool dry = mode == Mode::Dry, worker = mode == Mode::Worker;
@@ -696,6 +714,18 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
         case NOP_RESET_COUNTER: {
             const auto c = payload<nvn_p_counter>(a, avail);
             if (c.type == NVN_COUNTER_TYPE_SAMPLES_PASSED) s.samples_passed = 0;
+            break;
+        }
+        case NOP_FENCE_SYNC: {   // (pokopia) nvnCommandBufferFenceSync: signal the nvn_sync in stream order —
+                                 // the fence is every submit pushed now (an over-approximation: waits longer,
+                                 // never reads what this point's work has not written)
+            if (dry) break;
+            const auto f = payload<nvn_p_fence_sync>(a, avail);
+            if (!f.sync) break;
+            const uint32_t fenced = 1;
+            const uint64_t fence = rx_nvn_pushed();
+            host->gpu_write(f.sync + 4, &fenced, 4);
+            host->gpu_write(f.sync + 8, &fence, 8);
             break;
         }
         case NOP_COPY_B2B: {
@@ -823,11 +853,104 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
         }
         case NOP_BIND_PROGRAM: {
             const auto b = payload<nvn_p_bind_program>(a, avail);
-            // (the same program bound again: its descriptors already stand)
-            const bool same = b.prog && s.has_prog ? std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0 : !b.prog && !s.has_prog;
-            if (!same) s.bind_gen++;
-            if (b.prog) s.prog = *b.prog;
-            s.has_prog = b.prog != nullptr && b.prog->nstage > 0;
+            /* The bind's stage mask says which stages the program gives: masked stages of the bound set are replaced
+               by the program's stages of those ids, the rest stay (Pokopia binds a vertex program and a fragment
+               program apart). A program whose stages cannot be read keeps the old whole replace. A null program
+               unbinds the masked stages. As gpu/render/rx_nvn.cpp's NOP_BIND_PROGRAM. */
+            const uint32_t mask = (uint32_t)b.stages;
+            if (b.prog && b.prog->nstage <= 6) {
+                uint8_t nst[6];
+                bool known = true;
+                for (uint32_t i = 0; i < b.prog->nstage; i++) {
+                    nst[i] = nvn_stage_id(b.prog->sd[i].control);
+                    if (nst[i] > 7) known = false;
+                }
+                if (known) {
+                    nvn_prog m{};
+                    uint8_t mst[6];
+                    std::memset(mst, 0xff, sizeof mst);
+                    uint32_t n = 0;
+                    for (uint32_t i = 0; i < s.prog.nstage && n < 6; i++) {
+                        const uint8_t st = s.prog_stage[i];
+                        if (st <= 7 && (mask & (1u << st))) continue;   // masked: the new program's
+                        m.sd[n] = s.prog.sd[i];
+                        mst[n++] = st;
+                    }
+                    for (uint32_t i = 0; i < b.prog->nstage && n < 6; i++) {
+                        if (!(mask & (1u << nst[i]))) continue;
+                        m.sd[n] = b.prog->sd[i];
+                        mst[n++] = nst[i];
+                    }
+                    // by stage, so the same stages bound in another order are the same program
+                    for (uint32_t i = 1; i < n; i++) {
+                        const nvn_stage_data sd = m.sd[i];
+                        const uint8_t st = mst[i];
+                        uint32_t j = i;
+                        while (j && mst[j - 1] > st) m.sd[j] = m.sd[j - 1], mst[j] = mst[j - 1], j--;
+                        m.sd[j] = sd;
+                        mst[j] = st;
+                    }
+                    // a serial of the merged set's contents: stable while the same stages stay bound
+                    uint64_t h = 0xCBF29CE484222325ull;
+                    for (uint32_t i = 0; i < n; i++) {
+                        h = (h ^ m.sd[i].data) * 0x100000001B3ull;
+                        h = (h ^ (m.sd[i].control << 1)) * 0x100000001B3ull;
+                        h = (h ^ mst[i]) * 0x100000001B3ull;
+                    }
+                    m.nstage = n;
+                    m.magic = NVN_MAGIC('P', 'R', 'O', 'G');
+                    m.serial = h;
+                    const bool same = n == s.prog.nstage && m.serial == s.prog.serial;
+                    s.prog = m;
+                    std::memcpy(s.prog_stage, mst, sizeof mst);
+                    if (!same) s.bind_gen++;
+                    s.has_prog = n > 0;
+                    break;
+                }
+                {
+                    // (the same program bound again: its descriptors already stand)
+                    const bool same = s.has_prog && std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0;
+                    if (!same) s.bind_gen++;
+                }
+                s.prog = *b.prog;
+                s.prog.nstage = b.prog->nstage;
+                for (uint32_t i = 0; i < 6; i++)
+                    s.prog_stage[i] = i < s.prog.nstage ? nvn_stage_id(s.prog.sd[i].control) : 0xff;
+            } else {
+                // unbind: the masked stages leave the bound set
+                nvn_prog m{};
+                uint8_t mst[6];
+                std::memset(mst, 0xff, sizeof mst);
+                uint32_t n = 0;
+                for (uint32_t i = 0; i < s.prog.nstage && n < 6; i++) {
+                    const uint8_t st = s.prog_stage[i];
+                    if (st <= 7 && (mask & (1u << st))) continue;
+                    m.sd[n] = s.prog.sd[i];
+                    mst[n++] = st;
+                }
+                for (uint32_t i = 1; i < n; i++) {
+                    const nvn_stage_data sd = m.sd[i];
+                    const uint8_t st = mst[i];
+                    uint32_t j = i;
+                    while (j && mst[j - 1] > st) m.sd[j] = m.sd[j - 1], mst[j] = mst[j - 1], j--;
+                    m.sd[j] = sd;
+                    mst[j] = st;
+                }
+                uint64_t h = 0xCBF29CE484222325ull;
+                for (uint32_t i = 0; i < n; i++) {
+                    h = (h ^ m.sd[i].data) * 0x100000001B3ull;
+                    h = (h ^ (m.sd[i].control << 1)) * 0x100000001B3ull;
+                    h = (h ^ mst[i]) * 0x100000001B3ull;
+                }
+                m.nstage = n;
+                m.magic = NVN_MAGIC('P', 'R', 'O', 'G');
+                m.serial = h;
+                const bool same = n == s.prog.nstage && m.serial == s.prog.serial;
+                s.prog = m;
+                std::memcpy(s.prog_stage, mst, sizeof mst);
+                if (!same) s.bind_gen++;
+            }
+            s.has_prog = s.prog.nstage > 0;
             break;
         }
         case NOP_BIND_STATE: {

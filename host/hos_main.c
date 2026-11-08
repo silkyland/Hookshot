@@ -486,6 +486,11 @@ static int game_main(int argc, char **argv) {
     return 0;
 }
 
+#if defined(__ANDROID__)
+/* (android) host/android/android_main.c's android_main: the same entry, on the thread android_native_app_glue gave */
+__attribute__((visibility("default"))) int hos_game_main(int argc, char **argv) { return game_main(argc, argv); }
+#endif
+
 #ifndef _WIN32
 /* (linux) The window belongs on the process's main thread (SDL), so the game runs on a thread of its own, with the
    stack the guest main thread's lifted code needs (the main thread has the system's 8 MB): host/posix/display_sdl.c */

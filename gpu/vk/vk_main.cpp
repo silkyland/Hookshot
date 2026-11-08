@@ -87,6 +87,9 @@ bool create_instance() {
 #ifdef _WIN32
     const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     const uint32_t n_exts = 2;
+#elif defined(__ANDROID__)
+    const char* exts[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
+    const uint32_t n_exts = 2;
 #else
     // (linux: every window system's surface the loader has, for whichever one SDL's window is on: X11 or Wayland)
     const char* exts[4] = {VK_KHR_SURFACE_EXTENSION_NAME};

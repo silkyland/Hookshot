@@ -362,10 +362,18 @@ std::vector<uint32_t> region_gen(kPages / kRegionPages);
 // write, hundreds of MB) marks whole regions, not 512 pages each; it took dispatches 8-150 ms)
 std::vector<uint32_t> region_full(kPages / kRegionPages);
 inline uint32_t load_u32(uint32_t& x) {
+#ifdef __ANDROID__   /* (the NDK's libc++ has no std::atomic_ref) */
+    return __atomic_load_n(&x, __ATOMIC_ACQUIRE);
+#else
     return std::atomic_ref<uint32_t>(x).load(std::memory_order_acquire);
+#endif
 }
 inline void store_u32(uint32_t& x, uint32_t v) {
+#ifdef __ANDROID__
+    __atomic_store_n(&x, v, __ATOMIC_RELEASE);
+#else
     std::atomic_ref<uint32_t>(x).store(v, std::memory_order_release);
+#endif
 }
 inline uint32_t page_gen(uint64_t p) {
     const auto& c = gen_chunks[p / kChunkPages];

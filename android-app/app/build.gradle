@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.hookshot.oot'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "dev.hookshot.oot"
+        minSdk 30
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0-android"
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // the .so's are built by android/CMakeLists.txt and staged (stripped) into
+    // app/src/main/jniLibs/arm64-v8a/ — the payload (image.bin + romfs/) is not in
+    // the APK: it is pushed to the app's files dir (~26 GB; docs/PLAN-ANDROID.md M3)
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            jniDebuggable true
+            manifestPlaceholders = [debuggable: "true"]
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            // 16 KB page-size devices (Android 15+ requirement): keep the .so's uncompressed & page-aligned
+            keepDebugSymbols += ['**/*.so']
+        }
+    }
+}

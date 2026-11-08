@@ -18,6 +18,12 @@
 #include <x86intrin.h>
 #define HOOKSHOT_RDTSC() ((uint64_t)__rdtsc())
 #define HOOKSHOT_PAUSE() _mm_pause()
+#elif defined(__aarch64__)
+#define HOOKSHOT_RDTSC() ({ uint64_t _v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(_v)); _v; })
+#define HOOKSHOT_PAUSE() __asm__ volatile("yield" ::: "memory")
+#else
+#define HOOKSHOT_RDTSC() 0
+#define HOOKSHOT_PAUSE() ((void)0)
 #endif
 
 typedef struct VmaAllocation_T* VmaAllocation;   // (vk_mem_alloc.h's handle)

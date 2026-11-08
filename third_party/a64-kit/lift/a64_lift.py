@@ -864,7 +864,8 @@ class Lifter:
                 # ret / b / br: what follows is reached from elsewhere, so nothing above is known there
                 R.clear()
                 bounds.clear()
-                continue
+                bound = None   # the CMP->B.HI bound is block-local too: a b.hi after the branch answers
+                continue        # another path's flags, not this window's cmp (Pokopia 0x8013f168)
             d = w & 31
             n = (w >> 5) & 31
             m = (w >> 16) & 31

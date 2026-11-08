@@ -75,13 +75,15 @@ mkdir -p "$S/usr/lib/x86_64-linux-gnu" "$S/usr/lib/gcc/x86_64-linux-gnu" "$S/lib
 ln -s usr/lib "$S/lib"
 cp -a /usr/include "$S/usr/"
 rm -rf "$S/usr/include/c++" "$S/usr/include/x86_64-linux-gnu/c++" "$S/usr/include/llvm"* "$S/usr/include/clang"*
-M=/usr/lib/x86_64-linux-gnu
+M=$(dirname "$(readlink -f "$(gcc -print-file-name=libc.so.6)")")   # (the C library dir: Debian's multiarch, Arch's plain /usr/lib)
 for f in crt1.o crti.o crtn.o Scrt1.o rcrt1.o libc.so libc.so.6 libc_nonshared.a libm.so libm.so.6 libm.a libmvec.so libmvec.so.1 \
          libmvec.a libpthread.so.0 libpthread.a libdl.so.2 libdl.a librt.so.1 librt.a libutil.a libgcc_s.so.1 ld-linux-x86-64.so.2; do
     [ -e "$M/$f" ] && cp -a "$M/$f" "$S/usr/lib/x86_64-linux-gnu/" || true
+    # (the .so linker scripts name /usr/lib/<lib> absolutely: the same files at the sysroot's usr/lib too)
+    [ -e "$M/$f" ] && { mkdir -p "$S/usr/lib"; cp -a "$M/$f" "$S/usr/lib/"; } || true
 done
 cp -aL /lib64/ld-linux-x86-64.so.2 "$S/lib64/"
-GCC=$(ls -d /usr/lib/gcc/x86_64-linux-gnu/*/ | sort -V | tail -1)
+GCC=$(dirname "$(gcc -print-file-name=crtbegin.o)")   # (the gcc runtime dir: Debian's x86_64-linux-gnu, Arch's x86_64-pc-linux-gnu, ...)
 G=$S/usr/lib/gcc/x86_64-linux-gnu/$(basename "$GCC")
 mkdir -p "$G"
 for f in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o libgcc.a libgcc_eh.a libgcc_s.so; do

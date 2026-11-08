@@ -18,8 +18,23 @@
 
 /* the guest window (third_party/a64-kit/rt/a64.h A64_HOST_BASE, host/hos.h HOS_GUEST_SPACE): one mapping, all of it
    readable and writable, which VirtualQuery reports as committed without asking the kernel */
-#define GUEST_LO 0x100000000000ULL
-#define GUEST_HI (GUEST_LO + (1ULL << 39))
+#ifndef A64_HOST_BASE
+#define A64_HOST_BASE 0x100000000000ULL   /* (rt/a64.h's own default) */
+#endif
+#ifndef HOS_GUEST_SPACE
+#define HOS_GUEST_SPACE (1ULL << 39)
+#endif
+#define GUEST_LO A64_HOST_BASE
+/* the window's end is a runtime value: an Android build's compile-time size is a budget, of which hos_main.c maps
+   the largest rung the kernel allows and reports the end in the game's exported hos_posix_guest_hi (looked up as
+   hos_posix_keys is: this file is also built into hookshot_vk, which reads the game's copy). With no game-side
+   answer — the desktop build — the whole compile-time window. */
+static uintptr_t guest_hi(void) {
+    static volatile uint64_t *end;
+    static int looked;
+    if (!looked) { looked = 1; end = (volatile uint64_t *)dlsym(RTLD_DEFAULT, "hos_posix_guest_hi"); }
+    return end && *end ? (uintptr_t)*end : GUEST_LO + HOS_GUEST_SPACE;
+}
 
 /* ---- errors ---- */
 static __thread DWORD last_error;
@@ -640,7 +655,7 @@ void *VirtualAlloc(void *addr, SIZE_T size, DWORD type, DWORD protect) {
     }
     if (addr && (type & MEM_COMMIT) && !(type & MEM_RESERVE)) {
         /* (inside a reservation: made accessible; the guest window is accessible already) */
-        if ((uintptr_t)addr >= GUEST_LO && (uintptr_t)addr + size <= GUEST_HI) return addr;
+        if ((uintptr_t)addr >= GUEST_LO && (uintptr_t)addr + size <= guest_hi()) return addr;
         const uintptr_t lo = (uintptr_t)addr & ~(page - 1), hi = ((uintptr_t)addr + size + page - 1) & ~(page - 1);
         if (mprotect((void *)lo, hi - lo, prot_of(protect))) { fail_errno(); return NULL; }
         return addr;
@@ -688,9 +703,9 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
     memset(mbi, 0, sizeof *mbi);
     const uintptr_t a = (uintptr_t)addr, page = a & ~(uintptr_t)4095;
     mbi->BaseAddress = (void *)page;
-    if (a >= GUEST_LO && a < GUEST_HI) {
+    if (a >= GUEST_LO && a < guest_hi()) {
         mbi->AllocationBase = (void *)GUEST_LO;
-        mbi->RegionSize = GUEST_HI - page;
+        mbi->RegionSize = guest_hi() - page;
         mbi->State = MEM_COMMIT, mbi->Protect = mbi->AllocationProtect = PAGE_READWRITE, mbi->Type = 0x20000;
         return sizeof *mbi;
     }

@@ -79,6 +79,7 @@ constexpr int kRecordings = 48;   // (test: 24 before; with RX_VK_BATCH the ring
 Recording recordings[kRecordings];
 int recording_index = 0;
 
+uint64_t completed();
 /// (a recording slot's last submit done: before it is used again)
 void recording_wait(Recording& r) {
     if (!r.submitted) return;
@@ -99,6 +100,7 @@ void recording_wait(Recording& r) {
     vkWaitForFences(dev.device, 1, &r.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(dev.device, 1, &r.fence);
     r.submitted = false;
+    memory_writebacks_drain(completed());
 }
 
 uint64_t completed() {
@@ -182,6 +184,7 @@ void wait_value(uint64_t v) {
     wi.pSemaphores = &timeline;
     wi.pValues = &v;
     vkWaitSemaphores(dev.device, &wi, UINT64_MAX);
+    memory_writebacks_drain(v);   // (mirrors_only: that submission's staged writes reach guest memory now)
 }
 
 int64_t st_wait_ns;   // (time the replay waited for a recording slot: the GPU behind)
@@ -1972,7 +1975,12 @@ void finish() {
     wait_queue_empty();
     wait_value(pushed.load());
 }
-void wait_writebacks_reading(const void*, uint64_t) {}   // (nothing to write back: the GPU writes guest memory)
+void wait_writebacks_reading(const void* p, uint64_t n) {
+    // (mirrors_only: the GPU's writes reach guest memory after the submission's staged write-back drains)
+    const uint64_t v = memory_writebacks_pending(p, n);
+    if (v && v > completed()) wait_value(v);
+    memory_writebacks_drain(completed());
+}
 /// (host: the CPU is about to read [gpu, gpu + size), nvnMemoryPoolInvalidateMappedRange / nvnBufferInvalidateMappedRange)
 /// RX_VK_LOG_INVALIDATE=1: the ranges, 400 lines, and the textures the GPU wrote there (their texels are not in memory)
 // ---- live textures' storage, by 4 KB page (as the host made and finalized them, ahead of the replay) ----

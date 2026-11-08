@@ -41,6 +41,11 @@ uint64_t hos_space_end;
 #define GUEST_SPACE HOS_GUEST_SPACE
 #endif
 #define IMAGE_BASE hos_image_base   /* (the lift's: Eden's layout) */
+static uint64_t guest_window;   /* (android) the rung of the GUEST_SPACE budget the kernel let the window have */
+/* (android) the actual window's end, for the win32_posix copies (the game's and hookshot_vk's) to bound the guest
+   window by; 0 until reserve_guest picks a size, 0 forever on the desktop */
+volatile uint64_t hos_posix_guest_hi;
+uint64_t hos_guest_size(void);
 
 #ifdef _WIN32
 static void no_power_throttling(void) {
@@ -135,11 +140,38 @@ static int reserve_guest(void) {
        step: MAP_NORESERVE). Decommitting is madvise (host/posix/win32_posix.c VirtualFree): the pages read as zero. */
     void hos_commit_init(void);
     hos_commit_init();   /* (the crash report) */
-    if (mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) != (void *)A64_HOST_BASE) {
+    int ok = 0;
+#ifdef __ANDROID__
+    /* Android's user VA for a fixed map tops out under ~512 GB less what the kernel already keeps there, which
+       varies by device: the compile-time window is a budget — take the largest rung that maps at A64_HOST_BASE
+       (win32_posix.c reads the actual end back from hos_posix_guest_hi for VirtualQuery/VirtualAlloc). */
+    for (uint64_t s = GUEST_SPACE; s >= (40ULL << 30) && !ok; s -= s > (160ULL << 30) ? (32ULL << 30) : (16ULL << 30)) {
+        ok = mmap((void *)A64_HOST_BASE, s, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) == (void *)A64_HOST_BASE;
+        if (ok) {
+            guest_window = s;
+            hos_posix_guest_hi = A64_HOST_BASE + s;
+            hos_log("mem: guest window %llu GB of the %llu GB budget", (unsigned long long)(s >> 30),
+                    (unsigned long long)(GUEST_SPACE >> 30));
+        }
+    }
+#else
+    ok = mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
+              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) == (void *)A64_HOST_BASE;
+#endif
+    if (!ok) {
         fprintf(stderr, "guest window: mmap(%p, %#llx) -> %d (%s)\n", (void *)A64_HOST_BASE,
                 (unsigned long long)GUEST_SPACE, errno, strerror(errno));
 #ifdef __ANDROID__
+        /* what the kernel has above the window's base (why no rung fit) */
+        FILE *mf = fopen("/proc/self/maps", "r");
+        char mline[512];
+        while (mf && fgets(mline, sizeof mline, mf)) {
+            unsigned long mlo, mhi;
+            if (sscanf(mline, "%lx-%lx", &mlo, &mhi) == 2 && mhi > A64_HOST_BASE)
+                fprintf(stderr, "maps: %s", mline);
+        }
+        if (mf) fclose(mf);
         /* how high can a user-specified (fixed) map go, and how big can kernel-chosen maps get? */
         static const uint64_t gbases[] = {512, 640, 768, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072};
         for (int i = 0; i < 11; i++) {
@@ -164,14 +196,14 @@ static int reserve_guest(void) {
     /* (issue 312) no transparent huge pages in the guest window: the renderer imports its pools as userptr memory, and every
        collapse khugepaged makes in them changes their mappings, which the kernel answers by pinning the pages again at the
        next submission: ~250 ms a submit on RADV while the GPU sat idle. HOS_THP=1: as before */
-    if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, GUEST_SPACE, MADV_NOHUGEPAGE);
+    if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, hos_guest_size(), MADV_NOHUGEPAGE);
     return 1;
 #endif
 }
 
 /* The guest window, for the renderer (gpu/render/rx_buffer.cpp). */
 uint8_t *hos_guest_base(void) { return A64_MEM; }
-uint64_t hos_guest_size(void) { return GUEST_SPACE; }
+uint64_t hos_guest_size(void) { return guest_window ? guest_window : GUEST_SPACE; }
 
 /* Call guest code at `addr` as a fresh call from the top of the main thread's stack, with whatever arguments the
    caller put in x0-x7 (call_guest clears x0 and x1 first; call_guest_args keeps them). */
@@ -434,7 +466,7 @@ static int game_main(int argc, char **argv) {
     const long long file_size = _ftelli64(f);
     fseek(f, 0, SEEK_SET);
     if (file_size > 0) hos_commit(IMAGE_BASE, (uint64_t)file_size);
-    size_t n = file_size > 0 && (uint64_t)file_size <= GUEST_SPACE - IMAGE_BASE
+    size_t n = file_size > 0 && (uint64_t)file_size <= hos_guest_size() - IMAGE_BASE
                    ? fread(A64_MEM + IMAGE_BASE, 1, (size_t)file_size, f) : 0;
     fclose(f);
 #endif

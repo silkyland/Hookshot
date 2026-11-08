@@ -68,12 +68,34 @@ uint64_t hos_sys_alloc(uint64_t size, uint64_t align) {
     return a;
 }
 
+uint64_t hos_guest_size(void);
+/* The VAMM region svcGetInfo(29/30) reports: on the desktop 128 GB at 192 GB (fixed); on Android it floats to the
+   top of the mapped window so it always lands inside it (the window can shrink below the compile-time budget). */
+uint64_t hos_nx2_region(uint64_t *size) {
+    uint64_t guest = hos_guest_size(), s = 0;
+    if (guest > (1ULL << 39)) {
+        static const uint64_t fixed_base = 0x3000000000ULL;
+        if (fixed_base + (1ULL << 39) <= guest) s = 1ULL << 39;
+    }
+    if (!s) {                          /* float: the window's top quarter, at least 16 GB if it fits */
+        s = guest / 4;
+        if (s > (1ULL << 39)) s = 1ULL << 39;
+    }
+    if (size) *size = s;
+    return guest - s;
+}
+uint64_t hos_nx2_region_size(void) { uint64_t s; hos_nx2_region(&s); return s; }
+
 uint64_t hos_region_alloc(uint64_t size, uint64_t align) {
     if (align < 0x1000) align = 0x1000;
     size = (size + 0xFFF) & ~0xFFFULL;
     LOCK();
-    /* first fit, top-down, between existing regions (kept sorted by address, descending) */
+    /* first fit, top-down, between existing regions (kept sorted by address, descending). Android's window can end
+       below HOS_SPACE_END (its size is a budget — hos_main.c maps what fits): regions must land inside it */
     uint64_t top = HOS_SPACE_END, found = 0;
+    if (hos_guest_size() < top) top = hos_guest_size();
+    const uint64_t nx2_base = hos_nx2_region(NULL);   /* its top quarter is the game's VAMM, never ours */
+    if (top > nx2_base) top = nx2_base;
     int at = nregions;
     for (int i = 0; i <= nregions; i++) {
         uint64_t bottom = i < nregions ? regions[i].addr + regions[i].size : HOS_HEAP_BASE + hos_heap_size;

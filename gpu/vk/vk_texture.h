@@ -96,6 +96,10 @@ void texture_begin_recording(VkCommandBuffer upload_cmd, uint64_t value);
 bool texture_uploads_recorded();
 /// The recording's upload command buffer, to record into (its first use orders it after the work before)
 VkCommandBuffer upload_command_buffer();
+/// (vk_memory.cpp, mirrors_only) a slice of a host-visible staging arena, filled on the CPU and read by the GPU's
+/// copies in the submission being recorded (the arena is not reused until it completes)
+struct GuestStage { VkBuffer buffer = VK_NULL_HANDLE; uint64_t offset = 0; uint8_t* data = nullptr; };
+GuestStage guest_stage(uint64_t n);
 /// A copy of an RGBA8 region (decoded ASTC kept as RGBA8) into a texture kept as BC3: through the encoder
 bool texture_copy_into_bc(VkCommandBuffer cmd, Texture* src, uint32_t src_level, uint32_t src_layer, int sx, int sy,
                           Texture* dst, uint32_t dst_level, uint32_t dst_layer, int dx, int dy, uint32_t w, uint32_t h,

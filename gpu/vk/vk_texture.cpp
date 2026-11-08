@@ -252,6 +252,13 @@ Staging staging(uint64_t n, uint64_t align = 256) {
         logf("vk: staging arenas: %zu (%llu MB in this one)", arenas.size(), (unsigned long long)(a.size >> 20));
     return {a.buffer, 0, a.mapped};
 }
+}  // namespace
+// (vk_memory.cpp, mirrors_only: guest pages the syncs upload through)
+GuestStage guest_stage(uint64_t n) {
+    const Staging s = staging(n);
+    return {s.buffer, s.offset, s.data};
+}
+namespace {
 
 // ---- the GPU ASTC decoder (Eden's) ----
 struct AstcPush {

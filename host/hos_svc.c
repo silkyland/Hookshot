@@ -12,8 +12,15 @@
 #define R_OK 0
 /* (mkw-recomp) the region of GetInfo 29/30: 128 GB at 192 GB, between the heap (up from 64 GB) and the address
    regions (down from 512 GB); the SDK's VAMM backs pieces of it with MapPhysicalMemory */
-#define HOS_NX2_REGION_BASE 0x3000000000ULL
-#define HOS_NX2_REGION_SIZE 0x2000000000ULL
+/* (android) the window can be smaller than the desktop's 512 GB, so the region floats to the window's top
+   (hos_mem.c reserves it there) */
+#define HOS_NX2_REGION_BASE (hos_nx2_region(NULL))
+#define HOS_NX2_REGION_SIZE (hos_nx2_region_size())
+uint64_t hos_nx2_region(uint64_t *size);
+uint64_t hos_nx2_region_size(void);
+/* the game's VA budget is the mapped window, not the compile-time ideal (svcGetInfo answers must stay honest) */
+uint64_t hos_guest_size(void);
+static uint64_t space_end(void) { return hos_guest_size() < HOS_SPACE_END ? hos_guest_size() : HOS_SPACE_END; }
 #define R_INVALID_ENUM 0xF001   /* svc::ResultInvalidEnumValue */
 
 /* (pokopia) named-port sessions and their service names: sm: needs real answers (GetServiceHandle hands out
@@ -568,15 +575,15 @@ static uint64_t get_info(uint32_t id0, uint64_t id1, int *ok) {
     case 0: return (1u << hos_cores()) - 1;               /* CoreMask: cores 0 to hos_cores() - 1 */
     case 1: return 0xFFFFFFFFFFFFFFFFULL;                  /* PriorityMask */
     case 2: return HOS_HEAP_BASE;                          /* AliasRegionAddress */
-    case 3: return HOS_SPACE_END - HOS_HEAP_BASE;          /* AliasRegionSize */
+    case 3: return space_end() - HOS_HEAP_BASE;            /* AliasRegionSize */
     case 4: return HOS_HEAP_BASE;                          /* HeapRegionAddress */
-    case 5: return HOS_SPACE_END - HOS_HEAP_BASE;          /* HeapRegionSize */
+    case 5: return space_end() - HOS_HEAP_BASE;            /* HeapRegionSize */
     case 6: return hos_total_memory;                       /* TotalMemorySize */
     case 7: return hos_program_size + hos_heap_size;       /* UsedMemorySize */
     case 8: return 0;                                      /* DebuggerAttached */
     case 11: return 0x5A3C9E1F0B7D2468ULL ^ (id1 * 0x9E3779B97F4A7C15ULL);   /* RandomEntropy */
     case 12: return 0x08000000ULL;                         /* AslrRegionAddress */
-    case 13: return HOS_SPACE_END - 0x08000000ULL;         /* AslrRegionSize */
+    case 13: return space_end() - 0x08000000ULL;           /* AslrRegionSize */
     case 14: return HOS_SYSTEM_BASE;                       /* StackRegionAddress */
     case 15: return HOS_SYSTEM_END - HOS_SYSTEM_BASE;      /* StackRegionSize */
     case 16: case 17: return 0;                            /* SystemResourceSize total / used */

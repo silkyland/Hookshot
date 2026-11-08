@@ -27,7 +27,8 @@ static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info) {
     EXCEPTION_RECORD *rec = info->ExceptionRecord;
     if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     const uint8_t *p = (const uint8_t *)rec->ExceptionInformation[1];
-    if (p < A64_MEM || p >= A64_MEM + HOS_GUEST_SPACE) return EXCEPTION_CONTINUE_SEARCH;
+    uint64_t hos_guest_size(void);
+    if (p < A64_MEM || p >= A64_MEM + hos_guest_size()) return EXCEPTION_CONTINUE_SEARCH;
     const uint64_t guest = (uint64_t)(p - A64_MEM);
     if (guest < 0x100000) return EXCEPTION_CONTINUE_SEARCH;   /* (a null pointer: the game's own fault) */
     MEMORY_BASIC_INFORMATION mbi;

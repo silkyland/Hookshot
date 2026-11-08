@@ -125,9 +125,10 @@ target_compile_options(hookshot_game PRIVATE
     -O1 -g0 -fno-strict-aliasing -ffunction-sections -fdata-sections
     -DA64_POLLING -DA64_WRITE_TRACK
     # Android ARM64 caps process VA at 39 bits (512 GB): the desktop's 512 GB window at 16 TB
-    # can never map, so the guest window moves to 256 GB and shrinks to 64 GB — far above the
-    # app's ~12 GB pool and clear of the ~470 GB region the kernel already uses.
-    -DA64_HOST_BASE=0x4000000000ULL -DHOS_GUEST_SPACE=0x1000000000ULL
+    # can never map, so the guest window moves to 256 GB. Its size is a budget: the kernel keeps
+    # the top ~40 GB and the app has maps of its own, so reserve_guest (hos_main.c) maps the
+    # largest rung that fits — 256 GB here only says "never more" (the heap base is at 64 GB).
+    -DA64_HOST_BASE=0x4000000000ULL -DHOS_GUEST_SPACE=0x4000000000ULL
     -Wno-everything
 )
 target_include_directories(hookshot_game PRIVATE
@@ -152,8 +153,11 @@ target_compile_definitions(hookshot_game PRIVATE HOOKSHOT_ANDROID=1 _GNU_SOURCE)
 target_compile_options(hookshot_vk PRIVATE
     -O2 -g0 -DNDEBUG -fno-strict-aliasing -ffunction-sections -fdata-sections
     -Wno-everything
+    # its win32_posix.c copy needs the same guest-window base as the game's (the actual size
+    # arrives at runtime: the game's hos_posix_guest_hi over dlsym)
+    -DA64_HOST_BASE=0x4000000000ULL -DHOS_GUEST_SPACE=0x4000000000ULL
     -DVK_NO_PROTOTYPES -DMKWVK_BUILDING -DMKWVK_INCLUDES=2
-    -DHOOKSHOT_SHADER_STAMP=0x371d8e4b39880116ull   # (nx2/build.py's translator hash; recompute if gpu/vk sources change)
+    -DHOOKSHOT_SHADER_STAMP=0x51a2f7c9d3e04b68ull   # (nx2/build.py's translator hash; recompute if gpu/vk sources change)
 )
 target_include_directories(hookshot_vk PRIVATE
     "${HOOKSHOT_ROOT}/host/posix" "${HOOKSHOT_ROOT}/host" "${HOOKSHOT_ROOT}/gpu/vk"

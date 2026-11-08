@@ -17,6 +17,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #include "../hos.h"
 #include "android_input.h"
@@ -33,14 +35,33 @@ extern volatile int hos_posix_window[4];     /* android_display.c: focused, w, h
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, "hookshot", __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "hookshot", __VA_ARGS__)
 
-/* the files dir the payload lives in: HOOKSHOT_ANDROID_DATA, else <data>/files/hookshot */
+/* the files dir the payload lives in: HOOKSHOT_ANDROID_DATA, else the first candidate that already
+ * holds image.bin — the adb sideload path (app-private), then the no-adb paths a file manager or an
+ * HTTP download can reach: the app-specific external dir (no permission needed) and /sdcard/Hookshot
+ * (needs "All files access"). With nothing installed yet, the external dir is the writable default. */
 static void data_dir(char *out, size_t cap) {
     const char *e = getenv("HOOKSHOT_ANDROID_DATA");
     if (e && *e) { snprintf(out, cap, "%s", e); return; }
+    static const char *cands[] = {
+        NULL,   /* internalDataPath/files/hookshot, filled below */
+        "/sdcard/Android/data/dev.hookshot.oot/files/hookshot",
+        "/sdcard/Hookshot",
+    };
+    char internal[4096];
     const char *base = hos_android_app && hos_android_app->activity
                            ? hos_android_app->activity->internalDataPath : NULL;
-    if (!base) base = "/data/data/com.hookshot.oot/files";
-    snprintf(out, cap, "%s/files/hookshot", base);
+    /* internalDataPath already ends in .../files */
+    if (base) snprintf(internal, sizeof internal, "%s/hookshot", base);
+    else snprintf(internal, sizeof internal, "/data/data/dev.hookshot.oot/files/hookshot");
+    cands[0] = internal;
+    ALOGI("internalDataPath=%s", base ? base : "(null)");
+    for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
+        char img[4096];
+        snprintf(img, sizeof img, "%s/image.bin", cands[i]);
+        if (access(img, R_OK) == 0) { snprintf(out, cap, "%s", cands[i]); return; }
+        ALOGE("cand[%d] %s: %s", (int)i, cands[i], strerror(errno));
+    }
+    snprintf(out, cap, "%s", cands[1]);
 }
 
 static void ensure_dirs(const char *root) {
@@ -77,6 +98,18 @@ typedef struct { char dir[4096]; } BootArg;
 static void *game_thread(void *p) {
     BootArg *a = (BootArg *)p;
     ensure_dirs(a->dir);
+
+    /* the game's logs go to stderr — invisible on Android; mirror them into a file we can pull
+       (dup2 keeps the fd so logcat stays a fallback) */
+    {
+        char logp[4096];
+        snprintf(logp, sizeof logp, "%s/user/hookshot.log", a->dir);
+        int lf = open(logp, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+        if (lf >= 0) {
+            if (dup2(lf, 2) < 0) close(lf);   /* stderr -> hookshot.log */
+            else { setvbuf(stderr, NULL, _IOLBF, 0); }
+        }
+    }
 
     char image[4096], romfs[4096], user[4096];
     snprintf(image, sizeof image, "%s/image.bin", a->dir);

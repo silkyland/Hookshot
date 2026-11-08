@@ -43,13 +43,19 @@
 #define HOS_SYSTEM_BASE 0x01000000ULL
 #define HOS_SYSTEM_END 0x07000000ULL
 #define HOS_HEAP_BASE 0x1000000000ULL
+#ifndef HOS_GUEST_SPACE
 #define HOS_GUEST_SPACE (1ULL << 39)
+#endif
 extern const uint64_t hos_image_base, hos_image_end;   /* (gen/hos_image.c) */
 extern const uint64_t hos_program_id;                  /* (gen/hos_image.c: main.npdm's) */
 extern const char hos_main_build_id[];                 /* (gen/hos_image.c: main's NSO build id, hex) */
 /* (oot-recomp) MKW's own hooks at fixed guest addresses (its frame pacer in nvn_native.c / nn_vi.c, its idle loop in
    hos_thread.c) run only when the lifted main is Mario Kart World's: any other game has other code there */
 int hos_game_is_mkw(void);
+/* Which supported title the lifted image is (gen/hos_image.c's hos_main_build_id). Title-gated behaviour —
+   never a raw build-id compare at a call site — goes through this. */
+enum HosGameTitle { HOS_TITLE_OTHER = 0, HOS_TITLE_OOT = 1, HOS_TITLE_POKOPIA = 2 };
+int hos_game_title(void);
 #define HOS_GAME_TITLE "Hookshot"
 void hos_commit(uint64_t addr, uint64_t size);         /* (mkw_glue.c) guest pages made usable by host APIs */
 #if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)

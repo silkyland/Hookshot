@@ -124,6 +124,10 @@ message(STATUS "vma headers: ${VMA_HEADERS}")
 target_compile_options(hookshot_game PRIVATE
     -O1 -g0 -fno-strict-aliasing -ffunction-sections -fdata-sections
     -DA64_POLLING -DA64_WRITE_TRACK
+    # Android ARM64 caps process VA at 39 bits (512 GB): the desktop's 512 GB window at 16 TB
+    # can never map, so the guest window moves to 256 GB and shrinks to 64 GB — far above the
+    # app's ~12 GB pool and clear of the ~470 GB region the kernel already uses.
+    -DA64_HOST_BASE=0x4000000000ULL -DHOS_GUEST_SPACE=0x1000000000ULL
     -Wno-everything
 )
 target_include_directories(hookshot_game PRIVATE

@@ -58,6 +58,12 @@ static void no_power_throttling(void) {
 #endif
 
 int hos_game_is_mkw(void) { return !strcmp(hos_main_build_id, "d00e4f399e411d0613aa8d26b1c02fef"); }
+/* The supported titles, by main module build id (nx2/titles/ has the matching table for the build side). */
+int hos_game_title(void) {
+    if (!strncmp(hos_main_build_id, "e0f3ccfa", 8)) return HOS_TITLE_OOT;
+    if (!strncmp(hos_main_build_id, "76a489f3", 8)) return HOS_TITLE_POKOPIA;
+    return HOS_TITLE_OTHER;
+}
 
 /* gen/hos_image.c (build.py lift) */
 extern const uint64_t hos_main_stack_size;
@@ -130,8 +136,31 @@ static int reserve_guest(void) {
     void hos_commit_init(void);
     hos_commit_init();   /* (the crash report) */
     if (mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) != (void *)A64_HOST_BASE)
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) != (void *)A64_HOST_BASE) {
+        fprintf(stderr, "guest window: mmap(%p, %#llx) -> %d (%s)\n", (void *)A64_HOST_BASE,
+                (unsigned long long)GUEST_SPACE, errno, strerror(errno));
+#ifdef __ANDROID__
+        /* how high can a user-specified (fixed) map go, and how big can kernel-chosen maps get? */
+        static const uint64_t gbases[] = {512, 640, 768, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072};
+        for (int i = 0; i < 11; i++) {
+            errno = 0;
+            void *p = mmap((void *)(gbases[i] << 30), 1 << 16, PROT_READ,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+            fprintf(stderr, "fixed %lluGB -> %s (%d)\n", (unsigned long long)gbases[i],
+                    p == MAP_FAILED ? "FAIL" : "OK", errno);
+            if (p != MAP_FAILED) munmap(p, 1 << 16);
+        }
+        static const uint64_t gsizes[] = {256, 128, 64, 32, 16};
+        for (int i = 0; i < 5; i++) {
+            errno = 0;
+            void *p = mmap(NULL, gsizes[i] << 30, PROT_READ,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            fprintf(stderr, "any %lluGB -> %p (%d)\n", (unsigned long long)gsizes[i], p, errno);
+            if (p != MAP_FAILED) munmap(p, gsizes[i] << 30);
+        }
+#endif
         return 0;
+    }
     /* (issue 312) no transparent huge pages in the guest window: the renderer imports its pools as userptr memory, and every
        collapse khugepaged makes in them changes their mappings, which the kernel answers by pinning the pages again at the
        next submission: ~250 ms a submit on RADV while the GPU sat idle. HOS_THP=1: as before */
@@ -415,9 +444,10 @@ static int game_main(int argc, char **argv) {
         return 1;
     }
     hos_mem_init(hos_image_end);
-    {   /* (hookshot) HOS_ASPECT=<ratio> (2.3889 for 3440x1440): the one 16:9 constant in the game's data, read by the camera and the
+    if (hos_game_title() == HOS_TITLE_OOT) {   /* (hookshot) HOS_ASPECT=<ratio> (2.3889 for 3440x1440): the one 16:9 constant in the game's data, read by the camera and the
            scene setup, at the window's shape. The picture stays 16:9 and is stretched to the window, so the 3D keeps its proportions
-           and the HUD stretches with it. */
+           and the HUD stretches with it. OoT's address only: on another title 0x83e6131c is just some word that could
+           coincidentally read ~1.778 and get scribbled. */
         const char *e = getenv("HOS_ASPECT");
         uint8_t *at = (uint8_t *)A64_MEM + 0x83e6131cull;
         float was, want = e ? (float)atof(e) : 0.0f;

@@ -79,6 +79,11 @@ HLE(_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb) { RET(0); }
 HLE(_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii) { RET(0); }
 HLE(_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE) { RET(0); }
 
+/* nn::vi::QueryDisplayCurrentRefreshRate(nn::vi::RefreshRate*, bool*, nn::vi::Display const*) -> Result: a failure
+   result, so the game keeps its own default (it writes 60 Hz / not-auto on the error path itself) */
+HLE(_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPbPKNS0_7DisplayE) { RET(1); }
+HLE(_ZN2nn2vi36SetDisplay120HzRefreshRateCapabilityEPNS0_7DisplayEb) {}
+
 /* nn::vi::GetNativeWindow(void**, nn::vi::Layer*) -> Result: a window object (NVN builds its window on it; the
    native NVN layer only keeps the pointer) */
 HLE(_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE) {

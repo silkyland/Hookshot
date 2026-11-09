@@ -326,6 +326,7 @@ uint64_t memory_guest_pages() {
 }
 
 bool memory_init() {
+    if (getenv("RX_VK_MIRRORS_ONLY") != nullptr) dev.external_memory_host = false;   // (A/B: the mirrors-only path on any card)
     if (!dev.external_memory_host) {
         mirrors_only = true;
         align = 4096;
@@ -1598,7 +1599,7 @@ void mirror_inherit(Pool& p);   // (below: retired pools' GPU contents, for a fi
 /// The pages of the pool the CPU wrote since its mirror's sync, copied in (the upload command buffer)
 void mirror_sync(Pool& p) {
     // (mirrors_only: a pool's mirror is its only GPU residence — the first sync fills ALL of it, then only dirty pages)
-    const bool fill = mirrors_only && p.synced_epoch == 0;
+    const bool fill = mirrors_only && (p.synced_epoch == 0 || getenv("RX_VK_FILL_ALL") != nullptr);
     p.synced_epoch = mirror_epoch;
     p.sync_seg = texture_segment();
     mirror_synced.push_back(&p);
@@ -1982,6 +1983,8 @@ void reap_mirrors() {   // (pools_mu held)
     }
 }
 void mirror_free(Pool& p) {
+    if (mirrors_only) return;   // (the mirror is the range's only GPU residence: it stays, its BDA in the page table and
+                               // any descriptors cached on it keep working — freeing it sent a device lost)
     p.was_mirrored = true;
     {   // (the table back to guest memory, for a pool still in use only: a retired one's range is another pool's now, and its
         // address there sent the foliage culling into freed memory, a device lost)

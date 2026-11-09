@@ -280,6 +280,7 @@ static void realtime_step(int64_t now) {
 void hos_vi_native_presented(void) {
     static long long scan_n;
     scan_dt(++scan_n);
+    {   void nn_hid_shm_sample(void); nn_hid_shm_sample(); }   /* (Pokopia's pad state: the streamplay HID shm) */
     {   /* HOS_FRAME_SLEEP_MS (diagnostic): slower frames, for game speed against frame rate */
         static int ms = -1;
         if (ms < 0) ms = getenv("HOS_FRAME_SLEEP_MS") ? atoi(getenv("HOS_FRAME_SLEEP_MS")) : 0;

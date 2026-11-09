@@ -137,10 +137,11 @@ int nvn_gpu_write(uint64_t gpu, const void *src, uint64_t n) {
 }
 
 /* ---- device ---- */
-static volatile LONG depth_minus_w = 1;   /* (OoT's mode from the start: the shaders prepared before the game made its device were
-                                            translated without the depth conversion, and the menu's text and logo fell outside the depth range
-                                            on a first start. d3zessete, Hookshot PR 54) */
-int nvn_depth_minus_w(void) { return depth_minus_w != 0; }
+static volatile LONG depth_minus_w = -1;   /* (per title: OoT's shaders were made for near = -w, Pokopia's for
+                                            near = 0 — a first nvnDeviceSetDepthMode sets it for real; shaders
+                                            compiled before that call take this title's default) */
+static LONG depth_default(void) { return hos_game_title() == HOS_TITLE_POKOPIA ? 0 : 1; }
+int nvn_depth_minus_w(void) { LONG v = depth_minus_w; return (v < 0 ? depth_default() : v) != 0; }
 uint64_t nvn_native_proc(const char *name);
 
 NV(nvnDeviceBuilderSetDefaults) { memset(P(0), 0, sizeof(nvn_dev_builder)); }
@@ -233,7 +234,7 @@ NV(nvnDeviceSetDepthMode) {
     ((nvn_dev *)P(0))->depth_mode = U32(1);
     const LONG was = InterlockedExchange(&depth_minus_w, U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
     hos_log("nvn: depth mode %s", U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W ? "near = -w (GL)" : "near = 0");
-    if (was != (LONG)(depth_minus_w != 0))
+    if (was >= 0 && was != (LONG)(depth_minus_w != 0))
         hos_log("nvn: the depth mode is not the one the prepared shaders were made for: their vertex stages draw wrong");
 }
 NV(nvnDeviceFinalizeCommandHandle) {}

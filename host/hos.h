@@ -56,6 +56,7 @@ int hos_game_is_mkw(void);
    never a raw build-id compare at a call site — goes through this. */
 enum HosGameTitle { HOS_TITLE_OTHER = 0, HOS_TITLE_OOT = 1, HOS_TITLE_POKOPIA = 2 };
 int hos_game_title(void);
+uint8_t *hos_streamplay_shm(void);                            /* (hos_svc.c: the stpl:u guest-input block nn_hid.c fills) */
 #define HOS_GAME_TITLE "Hookshot"
 void hos_commit(uint64_t addr, uint64_t size);         /* (mkw_glue.c) guest pages made usable by host APIs */
 #if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)

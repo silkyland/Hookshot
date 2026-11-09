@@ -806,3 +806,48 @@ HLE(_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi) {
     G64(ARG(0)) = (uint64_t)InterlockedIncrement64(&sampling);
     RET(1);
 }
+
+/* ---- (hookshot) the streamplay HID shared memory (Switch 2's pad path) ------------------------
+   Pokopia's SDK reads pad state from the stpl:u GetHidSharedMemory block through
+   nn::streamplay::detail::HidSharedMemoryAccessor, not nn::hid calls: guest 0's pad type 0 slot
+   (shm + 0*0x24000 + 0*0xC000) gets a FullKey style and a 33-entry ring at +0x28. The ring's entry
+   is 0x38 bytes {u64, u64, seqlock @+0x10, head[0x20] @+0x18}; a record's tail {rx, ry, attr, rsv}
+   sits in the NEXT slot's +0x0..0x10, so the reader's 0x30-byte copy at +0x18 yields
+   {unk, sampling, buttons, lx, ly, rx, ry, attr, rsv} = GuestPadState{u64, NpadFullKeyState}.
+   Layout decoded from the sdk readers (GetGuestPadStyleSet sdk+0x6b1b04, GetGuestPadStates
+   sdk+0x6b1dc0, ring reader sdk+0x6b2760). */
+#define SHM_PAD_STRIDE 0x24000
+#define SHM_GUEST_STRIDE 0xC000
+#define SHM_RING_OFF 0x28
+#define SHM_RING_SLOTS 33
+#define SHM_ENTRY_SIZE 0x38
+static uint64_t shm_seq;
+void nn_hid_shm_sample(void) {
+    uint8_t *shm = hos_streamplay_shm();
+    if (!shm) return;
+    uint8_t *base = shm;                                     /* guest 0, pad type 0 */
+    *(uint32_t *)(base + 0) = 1;                             /* NpadStyleSet: FullKey (every frame: the
+                                                                 pointer moves from the object buffer to the
+                                                                 guest's mapping once the client maps it) */
+    uint64_t buttons;
+    int32_t stick[4];
+    read_input(&buttons, stick);
+    const uint64_t n = ++shm_seq;
+    const int slot = (int)(n % SHM_RING_SLOTS);
+    uint8_t *ring = base + SHM_RING_OFF;
+    uint8_t *e = ring + slot * SHM_ENTRY_SIZE;
+    *(uint64_t *)(e + 0x10) = 2 * n - 1;                     /* seqlock: odd while writing */
+    *(uint64_t *)(e + 0x18) = n;                             /* GuestPadState leading word */
+    *(uint64_t *)(e + 0x20) = n;                             /* NpadFullKeyState.sampling_number */
+    *(uint64_t *)(e + 0x28) = buttons;                       /* NpadButton bits */
+    *(int32_t *)(e + 0x30) = stick[0];                       /* lx */
+    *(int32_t *)(e + 0x34) = stick[1];                       /* ly */
+    uint8_t *t = ring + ((slot + 1) % SHM_RING_SLOTS) * SHM_ENTRY_SIZE;
+    *(int32_t *)(t + 0x00) = stick[2];                       /* rx */
+    *(int32_t *)(t + 0x04) = stick[3];                       /* ry */
+    *(uint32_t *)(t + 0x08) = 1;                             /* attributes: connected */
+    *(uint32_t *)(t + 0x0C) = 0;
+    *(uint64_t *)(e + 0x10) = 2 * n;                         /* seqlock: even, stable */
+    *(uint64_t *)(ring + 0x00) = n - 1;                      /* newest seq - 1 (reader adds 1) */
+    *(uint64_t *)(ring + 0x08) = n < SHM_RING_SLOTS ? n : SHM_RING_SLOTS;
+}

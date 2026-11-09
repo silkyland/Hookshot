@@ -597,7 +597,7 @@ uint8_t answer_of(uint32_t handle, bool image) {
     return image ? (uint8_t)(handle ? texture_answer(handle) & 0x80 : 0xFF) : texture_answer(handle);
 }
 uint64_t answers_hash(const Program& p) {
-    uint64_t h = 0;
+    uint64_t h = (uint64_t)p.depth_mode * 1099511628211ull;
     for (const Program::Answer& a : p.answers)
         h = (h ^ ((uint64_t)a.stage << 32 | (uint64_t)a.desc << 16 | (uint64_t)a.type << 1 | (uint64_t)a.image)) * 1099511628211ull;
     return h;
@@ -626,6 +626,7 @@ void record_answers(Program& p, const NvnState& s) {
 /// Whether the textures bound now answer what the variant's translation was told (a variant whose translation
 /// asked nothing stands for any, and an unbound slot takes any)
 bool still_valid(const NvnState& s, const Program& p) {
+    if (p.depth_mode != (uint32_t)(host->depth_minus_w() != 0)) return false;   // (translated for the other depth mode)
     for (const Program::Answer& a : p.answers) {
         const uint32_t h = answer_handle(s, p, a);
         if (h && answer_of(h, a.image) != a.type) return false;
@@ -814,6 +815,8 @@ uint64_t disk_stamp() {
 #endif
     };
     add(abi, sizeof abi);
+    const uint32_t record_format = 2;   // (2: depth_mode after the answers; 1 had none — an older file's layout misreads)
+    add(&record_format, sizeof record_format);
     for (char** e = _environ; e && *e; e++)
         for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH", "EDEN_"})
             if (!strncmp(*e, pre, strlen(pre))) add(*e, strlen(*e));
@@ -944,6 +947,7 @@ void program_cache_save(const Program& p, const std::vector<std::vector<uint32_t
     o.reserve(256 << 10);
     put(o, (uint32_t)((p.compute ? 1 : 0) | (p.mesh ? 2 : 0)));
     put_list(o, p.answers);
+    put(o, p.depth_mode);
     put(o, p.workgroup);
     put(o, p.shared_memory);
     put(o, (uint64_t)p.stages.size());
@@ -991,6 +995,7 @@ void program_cache_load(uint64_t key, std::vector<std::unique_ptr<Program>>& var
         const uint32_t kind = r.get<uint32_t>();
         p->compute = (kind & 1) != 0, p->mesh = (kind & 2) != 0;
         r.list(p->answers);
+        p->depth_mode = r.get<uint32_t>();
         p->variant = answers_hash(*p);
         p->workgroup = r.get<std::array<uint32_t, 3>>();
         p->shared_memory = r.get<uint32_t>();
@@ -1018,6 +1023,7 @@ void program_cache_load(uint64_t key, std::vector<std::unique_ptr<Program>>& var
 void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* fsc, const Code* csc,
                     const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
+    p.depth_mode = (uint32_t)(host->depth_minus_w() != 0);
     ptr_diag_reset();
     try {
         Shader::Backend::Bindings bindings{};
@@ -1219,6 +1225,7 @@ int bank_stage(const Code& c) {
 void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const Code& mesh, const Code* prim,
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
+    p.depth_mode = (uint32_t)(host->depth_minus_w() != 0);
     ptr_diag_reset();
     {   // (EvilOOT, RX_VK_MISS_LOG_PROG=<key prefix>: the miss log for that program only)
         static const char* only = getenv("RX_VK_MISS_LOG_PROG");
@@ -1493,8 +1500,9 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
              (long long)st_none, (long long)st_differ, (long long)st_calls);
     const uint64_t stages = prog_stage_sig(s.prog);
     const uint64_t bind = s.bind_gen, reg = registrations_generation(), ub = ub_generation();
+    const uint32_t dnow = (uint32_t)(host->depth_minus_w() != 0);
     for (const ProgFast& f : prog_fast)   // (the draw before this one, and the one that took turns with it)
-        if (f.on && f.p && f.p->ready.load(std::memory_order_acquire) && !f.p->failed &&
+        if (f.on && f.p && f.p->ready.load(std::memory_order_acquire) && !f.p->failed && f.p->depth_mode == dnow &&
             prog_same((int)kind, s.prog.serial, stages, bind, reg, ub, s.nvattr, s.vattr, color_types, f.kind, f.serial,
                       f.stages, f.bind, f.reg, f.ub, f.nvattr, f.vattr, f.ct))
             return st_hit++, f.p;
@@ -1510,7 +1518,7 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
         std::memcpy(f.ct, color_types, sizeof f.ct);
         return p;
     };
-    if (pk.p && pk.p->ready.load(std::memory_order_acquire) && !pk.p->failed) {
+    if (pk.p && pk.p->ready.load(std::memory_order_acquire) && !pk.p->failed && pk.p->depth_mode == dnow) {
         if (pk.p->answers.empty()) return st_hit++, keep(pk.p);
         static thread_local std::vector<uint32_t> now;
         answer_handles(s, *pk.p, now);

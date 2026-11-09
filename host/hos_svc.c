@@ -185,6 +185,19 @@ static uint64_t ipc_u64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return
    mapping copies it into the guest-chosen address and unmapping copies back. */
 typedef struct { uint32_t h; uint64_t size; uint8_t *buf; uint64_t map_addr, map_size; } IpcShm;
 static IpcShm ipc_shms[16];
+/* (hookshot) the streamplay "guest input" shared memory (stpl:u GetHidSharedMemory): on Switch 2 the SDK's
+   HidSharedMemoryAccessor reads pad/touch/jcms state from it directly — Pokopia's per-frame pad state comes
+   through here, not nn::hid calls. nn_hid.c fills guest 0's pad rings each frame (layout from the sdk readers:
+   pad slot = type {0,1,0x20->2} * 0x24000 + guest * 0xC000; style set u32 @+0, ring @+0x28 of 33 x 0x38). */
+static uint8_t hid_shm[0x84000];
+/* The guest reads its own mapping, not this buffer: while the client has it mapped, writes must land in the
+   guest's view or they never arrive (svcMapSharedMemory is a one-time copy, not shared pages). */
+uint8_t *hos_streamplay_shm(void) {
+    for (int i = 0; i < 16; i++)
+        if (ipc_shms[i].buf == hid_shm && ipc_shms[i].map_addr)
+            return GP(ipc_shms[i].map_addr);
+    return hid_shm;
+}
 static IpcShm *ipc_shm(uint32_t h) {
     for (int i = 0; i < 16; i++)
         if (ipc_shms[i].h == h) return &ipc_shms[i];
@@ -277,7 +290,6 @@ static void ipc_stpl_iu(uint8_t *tls, unsigned cmd, const uint8_t *args, uint32_
     case 503: out[0] = stpl_mode; ipc_write_reply(tls, ver, 0, out, 1, 0, 0, 0); return;
     case 504: ipc_write_reply(tls, ver, 0, out, 0x80, 0, 0, 0); return;   /* MatchmakeConfig -> 0x80 zeros */
     case 300: {                                                 /* GetHidSharedMemory -> {size, offset} + copy handle */
-        static uint8_t hid_shm[0x84000];                        /* zeroed: no guest pad, empty rings */
         const uint64_t sz = sizeof hid_shm;
         memcpy(out, &sz, 8);                                    /* offset stays 0 */
         const uint32_t h = ipc_new_shm(hid_shm, sz);

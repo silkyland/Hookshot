@@ -358,12 +358,18 @@ static void binds_load(void) {
     }
     binds_default();
     char path[MAX_PATH];
-    const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-    char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
+    const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
     FILE *f = NULL;
-    if (slash) {
-        snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+    if (data && *data) {
+        snprintf(path, sizeof path, "%s/hookshot_options.ini", data);
         f = fopen(path, "r");
+    } else {
+        const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+        char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
+        if (slash) {
+            snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+            f = fopen(path, "r");
+        }
     }
     int changed = 0;
     if (f) {

@@ -827,10 +827,15 @@ void disk_init() {
     static std::once_flag once;
     std::call_once(once, [] {
         if (getenv("RX_VK_NO_PROGRAM_CACHE")) return;
-        char exe[MAX_PATH];
-        const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        std::string path(exe, n);
-        path = path.substr(0, path.find_last_of("\\/") + 1) + "hookshot_programs.bin";
+        std::string path;
+        if (const char* data = getenv("HOOKSHOT_ANDROID_DATA"))   // (android: the native lib dir is read-only)
+            path = std::string(data) + "/hookshot_programs.bin";
+        else {
+            char exe[MAX_PATH];
+            const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+            path = std::string(exe, n);
+            path = path.substr(0, path.find_last_of("\\/") + 1) + "hookshot_programs.bin";
+        }
         const uint64_t stamp = disk_stamp();
         int64_t good = 0, whole = 0;
         if (FILE* f = fopen(path.c_str(), "rb")) {

@@ -24,6 +24,7 @@
 #include "android_input.h"
 
 int hos_game_main(int argc, char **argv);   /* host/hos_main.c */
+void hos_env_file(const char *path);        /* host/hos_main.c: hookshot_env.txt's NAME=VALUE lines */
 int hos_display_init(void);                  /* host/android/android_display.c */
 
 struct android_app *hos_android_app;
@@ -42,18 +43,23 @@ extern volatile int hos_posix_window[4];     /* android_display.c: focused, w, h
 static void data_dir(char *out, size_t cap) {
     const char *e = getenv("HOOKSHOT_ANDROID_DATA");
     if (e && *e) { snprintf(out, cap, "%s", e); return; }
-    static const char *cands[] = {
-        NULL,   /* internalDataPath/files/hookshot, filled below */
-        "/sdcard/Android/data/dev.hookshot.oot/files/hookshot",
-        "/sdcard/Hookshot",
-    };
-    char internal[4096];
+    char internal[4096], external[4096] = "/sdcard/Android/data/dev.hookshot.oot/files/hookshot";
     const char *base = hos_android_app && hos_android_app->activity
                            ? hos_android_app->activity->internalDataPath : NULL;
-    /* internalDataPath already ends in .../files */
-    if (base) snprintf(internal, sizeof internal, "%s/hookshot", base);
-    else snprintf(internal, sizeof internal, "/data/data/dev.hookshot.oot/files/hookshot");
-    cands[0] = internal;
+    /* internalDataPath already ends in .../files; the package name (dev.hookshot.*) is the component
+       before it, so the external-dir candidate follows the installed app, not a fixed one */
+    if (base) {
+        snprintf(internal, sizeof internal, "%s/hookshot", base);
+        char tmp[4096];
+        snprintf(tmp, sizeof tmp, "%s", base);
+        char *files = strrchr(tmp, '/');
+        if (files) {
+            *files = 0;
+            const char *pkg = strrchr(tmp, '/');
+            if (pkg) snprintf(external, sizeof external, "/sdcard/Android/data/%s/files/hookshot", pkg + 1);
+        }
+    } else snprintf(internal, sizeof internal, "/data/data/dev.hookshot.oot/files/hookshot");
+    const char *cands[] = {internal, external, "/sdcard/Hookshot"};
     ALOGI("internalDataPath=%s", base ? base : "(null)");
     for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
         char img[4096];
@@ -98,6 +104,12 @@ typedef struct { char dir[4096]; } BootArg;
 static void *game_thread(void *p) {
     BootArg *a = (BootArg *)p;
     ensure_dirs(a->dir);
+    {   /* hookshot_env.txt: hos_main.c's game_main never loads it (that is main()'s job on Linux/Windows), so the
+           switches it carries — RX_VK_ADRENO_DIR and the rest — were dead letters on Android */
+        char env[4096];
+        snprintf(env, sizeof env, "%s/hookshot_env.txt", a->dir);
+        hos_env_file(env);
+    }
 
     /* the game's logs go to stderr — invisible on Android; mirror them into a file we can pull
        (dup2 keeps the fd so logcat stays a fallback) */
@@ -136,6 +148,9 @@ void android_main(struct android_app *app) {
 
     BootArg *arg = calloc(1, sizeof *arg);
     data_dir(arg->dir, sizeof arg->dir);
+    /* publish it: "beside the .so" paths (shader/pipeline caches, language.txt, hookshot_options.ini)
+       resolve against HOOKSHOT_ANDROID_DATA — the native lib dir is read-only */
+    setenv("HOOKSHOT_ANDROID_DATA", arg->dir, 1);
     ALOGI("data dir: %s", arg->dir);
     hos_display_init();   /* hos_posix_window[]'s first read (the surface fills the rest in on_app_cmd) */
 

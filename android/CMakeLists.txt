@@ -26,6 +26,38 @@ if(NOT EXISTS "${RT64_DIR}/a64_rt.c")
     message(FATAL_ERROR "no generated runtime at ${RT64_DIR} — run nx2/build.py once (it writes rt64/)")
 endif()
 
+# mkw_info.c: nx2/build.py's write_info — image base + the main module's build id (hos_game_title() keys on
+# it) from IMAGE_JSON, generated at configure time so a per-title build needs no hand-edited file; the
+# checked-in gen/mkw_info.c is the fallback when IMAGE_JSON is not there
+set(MKW_INFO_C "${CMAKE_CURRENT_SOURCE_DIR}/gen/mkw_info.c")
+if(EXISTS "${IMAGE_JSON}")
+    file(READ "${IMAGE_JSON}" _image_json)
+    string(JSON _base GET "${_image_json}" base)
+    string(JSON _nmods LENGTH "${_image_json}" modules)
+    set(_build_id "")
+    math(EXPR _last "${_nmods} - 1")
+    foreach(_i RANGE ${_last})
+        string(JSON _name GET "${_image_json}" modules ${_i} name)
+        if(_name STREQUAL "main")
+            string(JSON _build_id GET "${_image_json}" modules ${_i} build_id)
+        endif()
+    endforeach()
+    if(NOT _build_id)
+        message(FATAL_ERROR "mkw_info: no module named \"main\" in ${IMAGE_JSON}")
+    endif()
+    math(EXPR _base_hex "${_base}" OUTPUT_FORMAT HEXADECIMAL)
+    set(_mkw "/* Generated for the Android build from image.json. */\n#include <stdint.h>\nconst uint64_t mkw_image_base = ${_base_hex}ULL;\nconst char mkw_main_build_id[] = \"${_build_id}\";\n")
+    set(MKW_INFO_C "${CMAKE_BINARY_DIR}/mkw_info.c")
+    set(_was "")
+    if(EXISTS "${MKW_INFO_C}")
+        file(READ "${MKW_INFO_C}" _was)
+    endif()
+    if(NOT _was STREQUAL _mkw)
+        file(WRITE "${MKW_INFO_C}" "${_mkw}")
+    endif()
+    message(STATUS "mkw_info: build id ${_build_id} (from ${IMAGE_JSON})")
+endif()
+
 # ---- the lifted game: gen/*.c + the generated runtime + the Eden ABI shim + mkw_info.c -------------------------
 file(GLOB GEN_C "${GEN_DIR}/*.c")
 list(REMOVE_ITEM GEN_C "${GEN_DIR}/a64_fpx.c")   # (header-only helpers if present; harmless either way)
@@ -33,7 +65,7 @@ list(REMOVE_ITEM GEN_C "${GEN_DIR}/a64_fpx.c")   # (header-only helpers if prese
 add_library(hookshot_game SHARED
     ${GEN_C}
     "${RT64_DIR}/a64_rt.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/gen/mkw_info.c"
+    "${MKW_INFO_C}"
 )
 
 # ---- the host runtime (host/*.c), Android's set ---------------------------------------------------------------
@@ -47,6 +79,7 @@ list(APPEND HOST_C
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/android_input.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/android_touch.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/android_main.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/android_media_av1.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/ffmpeg_stub.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/android_compat.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/../host/android/a64_ctx.S"
@@ -121,6 +154,20 @@ message(STATUS "spirv headers: ${SPIRV_HEADERS}")
 message(STATUS "vma headers: ${VMA_HEADERS}")
 
 # ---- flags -------------------------------------------------------------------------------------------------------
+# HOOKSHOT_SHADER_STAMP (nx2/build.py's translator hash): recomputed from the sources so a programs cache
+# stays keyed to what translates them — a stale stamp silently drops it. The baked value is the fallback
+# when python is not on PATH.
+set(HOOKSHOT_SHADER_STAMP "0x51a2f7c9d3e04b68ull" CACHE STRING "translator hash for the shader caches")
+find_program(_python NAMES python3 python)
+if(_python)
+    execute_process(COMMAND "${_python}" "${CMAKE_CURRENT_SOURCE_DIR}/shader_stamp.py" "${HOOKSHOT_ROOT}/gpu/vk"
+                    OUTPUT_VARIABLE _stamp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _stamp_rc)
+    if(_stamp_rc EQUAL 0 AND _stamp MATCHES "^0x[0-9a-f]+ull$")
+        set(HOOKSHOT_SHADER_STAMP "${_stamp}")
+    endif()
+endif()
+message(STATUS "shader stamp: ${HOOKSHOT_SHADER_STAMP}")
+
 target_compile_options(hookshot_game PRIVATE
     -O1 -g0 -fno-strict-aliasing -ffunction-sections -fdata-sections
     -DA64_POLLING -DA64_WRITE_TRACK
@@ -138,6 +185,7 @@ target_include_directories(hookshot_game PRIVATE
     "${HOOKSHOT_ROOT}/third_party/opus/silk" "${HOOKSHOT_ROOT}/third_party/opus/silk/float"
     "${HOOKSHOT_ROOT}/third_party/opus/src"
     "${HOOKSHOT_ROOT}/third_party/stb"
+    "${HOOKSHOT_ROOT}/third_party/dav1d/include"
     "${FFMPEG_INCLUDE}"
 )
 # opus's temporary-allocation mode and export macros, as nx2/build.py's -D set
@@ -157,7 +205,7 @@ target_compile_options(hookshot_vk PRIVATE
     # arrives at runtime: the game's hos_posix_guest_hi over dlsym)
     -DA64_HOST_BASE=0x4000000000ULL -DHOS_GUEST_SPACE=0x4000000000ULL
     -DVK_NO_PROTOTYPES -DMKWVK_BUILDING -DMKWVK_INCLUDES=2
-    -DHOOKSHOT_SHADER_STAMP=0x51a2f7c9d3e04b68ull   # (nx2/build.py's translator hash; recompute if gpu/vk sources change)
+    -DHOOKSHOT_SHADER_STAMP=${HOOKSHOT_SHADER_STAMP}   # (nx2/build.py's translator hash — shader_stamp.py above)
 )
 target_include_directories(hookshot_vk PRIVATE
     "${HOOKSHOT_ROOT}/host/posix" "${HOOKSHOT_ROOT}/host" "${HOOKSHOT_ROOT}/gpu/vk"
@@ -172,7 +220,10 @@ target_compile_definitions(hookshot_vk PRIVATE HOOKSHOT_ANDROID=1 _GNU_SOURCE)
 set_source_files_properties(${VK_C} ${VK_CPP} PROPERTIES LANGUAGE CXX)
 
 # ---- link --------------------------------------------------------------------------------------------------------
-target_link_libraries(hookshot_game PRIVATE log android aaudio vulkan atomic m dl)
+# bundled libdav1d (third_party/dav1d/lib/arm64-v8a, cross-built with the NDK) for the AV1 movie decoder;
+# the platform's MediaCodec path stays as the HOS_AV1_MC=1 fallback in host/android/android_media_av1.c
+target_link_libraries(hookshot_game PRIVATE log android aaudio vulkan atomic m dl mediandk
+    "${HOOKSHOT_ROOT}/third_party/dav1d/lib/arm64-v8a/libdav1d.a")
 # the vk lib reads the game's hos_posix_* state by name (win32_posix.c's dlsym(RTLD_DEFAULT, ...)): on Android the
 # "executable" is libhookshot_game.so, loaded RTLD_LOCAL by NativeActivity — its symbols reach the global scope only
 # as a DT_NEEDED of the vk lib, so link it (the dependency is already satisfied: the game lib is what dlopen'd it)

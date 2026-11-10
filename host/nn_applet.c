@@ -52,9 +52,13 @@ static const char *desired_language(void) {
     } else {
         char path[300] = "language.txt";
 #if !defined(__EMSCRIPTEN__)   /* (linux too: host/posix) */
-        DWORD n = GetModuleFileNameA(NULL, path, 260);
-        while (n > 0 && path[n - 1] != 92 && path[n - 1] != 47) n--;
-        snprintf(path + n, sizeof path - n, "language.txt");
+        const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
+        if (data && *data) snprintf(path, sizeof path, "%s/language.txt", data);
+        else {
+            DWORD n = GetModuleFileNameA(NULL, path, 260);
+            while (n > 0 && path[n - 1] != 92 && path[n - 1] != 47) n--;
+            snprintf(path + n, sizeof path - n, "language.txt");
+        }
 #endif
         FILE *f = fopen(path, "r");
         if (f) {

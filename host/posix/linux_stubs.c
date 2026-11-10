@@ -7,6 +7,7 @@
 #include "../hos.h"
 #include "../../gpu/vk/vk_api.h"
 
+#ifndef HOOKSHOT_ANDROID   /* (android) host/android/android_media_av1.c: MediaCodec's AV1 decoder instead */
 typedef void (*mf_av1_picture_fn)(void *user, const uint8_t *y, const uint8_t *uv, int w, int h, int stride, int64_t pts);
 void *mf_av1_open(int w, int h) { (void)w, (void)h; return NULL; }
 void mf_av1_decode(void *m, const uint8_t *data, size_t n, int64_t pts, mf_av1_picture_fn fn, void *user) {
@@ -14,6 +15,7 @@ void mf_av1_decode(void *m, const uint8_t *data, size_t n, int64_t pts, mf_av1_p
 }
 void mf_av1_flush(void *m) { (void)m; }
 void mf_av1_close(void *m) { (void)m; }
+#endif
 
 int wgr_start(void *hwnd) { (void)hwnd; hos_log("rx: no WebGPU renderer in the Linux build: nothing is drawn"); return 0; }
 void wgr_resize(int width, int height) { (void)width, (void)height; }

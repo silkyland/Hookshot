@@ -206,6 +206,8 @@ void gpu_time_collect(Recording& r) {
     st_gpu_max_ns = std::max(st_gpu_max_ns, ns);
 }
 void gpu_time_begin(Recording& r) {
+    static const bool no_ts = getenv("RX_VK_NO_TS") != nullptr;   // (A/B: no timestamp pair per submit)
+    if (no_ts) return;
     if (!ts_pool) {
         VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;

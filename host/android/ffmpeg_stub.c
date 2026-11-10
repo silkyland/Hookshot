@@ -4,6 +4,7 @@
    opens — movies don't play (the same as a build without FFmpeg), everything else runs. Replace with real
    arm64 FFmpeg static libs when they exist (PLAN-ANDROID.md M3). */
 #include <stdint.h>
+#include <stdlib.h>
 
 void *avcodec_find_decoder_by_name(const char *name) { (void)name; return 0; }
 void *avcodec_find_decoder(int id) { (void)id; return 0; }
@@ -17,7 +18,7 @@ void *av_frame_alloc(void) { return 0; }
 void av_frame_free(void *frame) { (void)frame; }
 void av_frame_unref(void *frame) { (void)frame; }
 void *av_packet_alloc(void) { return 0; }
-void av_packet_free(void *pkt) { (void)pkt; }
+void av_packet_free(void *pkt) { (void)pkt; }   /* (nn_video.c av_packet_raw blocks are freed whole: free() here hit a guest pointer) */
 int av_new_packet(void *pkt, int size) { (void)pkt, (void)size; return -1; }
 void *sws_getContext(int srcW, int srcH, int srcFormat, int dstW, int dstH, int dstFormat,
                      int flags, const void *srcFilter, const void *dstFilter, const double *param) {

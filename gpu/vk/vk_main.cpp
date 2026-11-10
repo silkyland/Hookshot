@@ -10,6 +10,11 @@
 #include <string>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#include <link.h>
+#endif
+
 #include "vk_api.h"
 #include "vk_internal.h"
 
@@ -23,9 +28,51 @@ VKX_DEVICE3(VKX_DEFINE)
 #undef VKX_DEFINE
 
 static PFN_vkGetInstanceProcAddr get_instance_proc;
+static HMODULE vk_module;   // (android) adrenotools' hooked libvulkan when RX_VK_ADRENO_DIR is set
+
+#ifdef __ANDROID__
+// RX_VK_ADRENO_DIR=<dir>: before libvulkan.so is first opened, libadrenotools swaps in the custom driver named by
+// RX_VK_ADRENO_DRIVER (default vulkan.purple.so, a Mesa Turnip build) from <dir>. The stock Adreno driver's device
+// losses are the failure every Vulkan recomp on Android hits; Turnip is the community's fix. The hook libraries
+// (libmain_hook.so & co) must sit beside this .so in the app's nativeLibraryDir — jniLibs/arm64-v8a.
+static void adreno_driver() {
+    const char* dir = getenv("RX_VK_ADRENO_DIR");
+    if (!dir || !*dir) return;
+    const char* soname = getenv("RX_VK_ADRENO_DRIVER");
+    if (!soname || !*soname) soname = "vulkan.purple.so";
+    Dl_info self{};
+    if (!dladdr((void*)&adreno_driver, &self) || !self.dli_fname) {
+        fprintf(stderr, "vk: adrenotools: cannot find this module's path\n");
+        return;
+    }
+    std::string nativelib = self.dli_fname;
+    nativelib.resize(nativelib.find_last_of('/') + 1);
+    nativelib.pop_back();
+    void* at = dlopen((nativelib + "/libadrenotools.so").c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!at) {
+        fprintf(stderr, "vk: adrenotools: libadrenotools.so did not load: %s\n", dlerror());
+        return;
+    }
+    typedef void* (*open_fn)(int, int, const char*, const char*, const char*, const char*, const char*, void**);
+    auto open_libvulkan = (open_fn)dlsym(at, "adrenotools_open_libvulkan");
+    if (!open_libvulkan) {
+        fprintf(stderr, "vk: adrenotools: no adrenotools_open_libvulkan\n");
+        return;
+    }
+    std::string driver_dir = dir;
+    if (driver_dir.back() != '/') driver_dir += '/';   // (adrenotools concatenates dir+soname itself)
+    void* h = open_libvulkan(RTLD_NOW, 1 /*ADRENOTOOLS_DRIVER_CUSTOM*/, nullptr, nativelib.c_str(),
+                             driver_dir.c_str(), soname, nullptr, nullptr);
+    fprintf(stderr, "vk: adrenotools%s: %s in %s\n", h ? "" : " FAILED", soname, driver_dir.c_str());
+    if (h) vk_module = (HMODULE)h;   // (the hooked loader: its driver load is what the hook redirects to Turnip)
+}
+#endif
 
 bool load_global() {
-    HMODULE m = LoadLibraryA("vulkan-1.dll");   // (linux: libvulkan.so.1, host/posix/win32_posix.c)
+#ifdef __ANDROID__
+    adreno_driver();
+#endif
+    HMODULE m = vk_module ? vk_module : LoadLibraryA("vulkan-1.dll");   // (linux: libvulkan.so.1, host/posix/win32_posix.c)
     if (!m) return false;
     get_instance_proc = (PFN_vkGetInstanceProcAddr)(void*)GetProcAddress(m, "vkGetInstanceProcAddr");
     if (!get_instance_proc) return false;

@@ -333,11 +333,7 @@ static const char *saves_dir(const char *beside) {
 /* hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the
    switches players are asked to test (RX_VK_NOOPT and the rest). Lines starting with # are notes. On Linux this runs
    before the window, so HOS_HEADLESS and HOS_WINDOW_SIZE are already set when the window is made. */
-static void load_hookshot_env(void) {
-    char path[MAX_PATH + 32];
-    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-    while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
-    memcpy(path + n, "hookshot_env.txt", 17);
+void hos_env_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[512];
@@ -357,6 +353,18 @@ static void load_hookshot_env(void) {
 #endif
     }
     fclose(f);
+}
+
+static void load_hookshot_env(void) {
+    char path[MAX_PATH + 32];
+    const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
+    if (data && *data) snprintf(path, sizeof path, "%s/hookshot_env.txt", data);
+    else {
+        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+        while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
+        memcpy(path + n, "hookshot_env.txt", 17);
+    }
+    hos_env_file(path);
 }
 
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
@@ -487,17 +495,20 @@ static int game_main(int argc, char **argv) {
         if (!e) {   /* (the Insert menu's Ultrawide, off unless it says 1: the main monitor's shape) */
             int on = 0;
             char path[MAX_PATH];
-            const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-            char *slash = len ? strrchr(path, SEP) : NULL;
-            if (slash) {
-                snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
-                FILE *o = fopen(path, "r");
-                if (o) {
-                    char line[80];
-                    while (fgets(line, sizeof line, o))
-                        if (!strncmp(line, "ultrawide=", 10)) on = atoi(line + 10) != 0;
-                    fclose(o);
-                }
+            const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
+            if (data && *data) snprintf(path, sizeof path, "%s/hookshot_options.ini", data);
+            else {
+                const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+                char *slash = len ? strrchr(path, SEP) : NULL;
+                if (slash) snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+                else path[0] = 0;
+            }
+            FILE *o = path[0] ? fopen(path, "r") : NULL;
+            if (o) {
+                char line[80];
+                while (fgets(line, sizeof line, o))
+                    if (!strncmp(line, "ultrawide=", 10)) on = atoi(line + 10) != 0;
+                fclose(o);
             }
             const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
             if (on && sh > 0 && (float)sw / (float)sh > 1.8f) want = (float)sw / (float)sh;

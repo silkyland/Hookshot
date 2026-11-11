@@ -580,33 +580,66 @@ void *GetCurrentFiber(void) { return cur_fiber; }
 void *GetFiberData(void) { return cur_fiber ? cur_fiber->param : NULL; }
 
 /* ---- processors ---- */
-static int read_int(const char *path) {
+static ULONG_PTR read_cpu_list(const char *path) {
     FILE *f = fopen(path, "r");
-    int v = -1;
-    if (f) {
-        if (fscanf(f, "%d", &v) != 1) v = -1;
-        fclose(f);
+    if (!f) return 0;
+    char line[512];
+    const int read = fgets(line, sizeof line, f) != NULL;
+    fclose(f);
+    if (!read || strlen(line) == sizeof line - 1) return 0;
+    ULONG_PTR mask = 0;
+    char *p = line;
+    for (;;) {
+        if (*p < '0' || *p > '9') return 0;
+        char *end;
+        unsigned long first = strtoul(p, &end, 10), last = first;
+        if (first >= 64) return 0;
+        p = end;
+        if (*p == '-') {
+            p++;
+            if (*p < '0' || *p > '9') return 0;
+            last = strtoul(p, &end, 10);
+            if (last < first || last >= 64) return 0;
+            p = end;
+        }
+        for (unsigned long cpu = first; cpu <= last; cpu++) mask |= (ULONG_PTR)1 << cpu;
+        if (*p == ',') { p++; continue; }
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        return *p ? 0 : mask;
     }
-    return v;
 }
 BOOL GetLogicalProcessorInformation(SYSTEM_LOGICAL_PROCESSOR_INFORMATION *info, DWORD *len) {
-    /* one RelationProcessorCore entry per physical core, its logical processors (SMT siblings) in the mask */
-    int core_of[64], pkg_of[64], n = 0;
+    /* Kernel sibling maps identify physical cores directly. ARM core_id values can repeat across clusters
+       within one package: grouping by (package_id, core_id) merged separate cores on Snapdragon and made
+       hos_reserved_cpus() reserve CPUs 0,3,7 instead of CPU7 alone. */
+    int n = 0;
     long cpus = sysconf(_SC_NPROCESSORS_CONF);
+    if (cpus <= 0) { last_error = ERROR_INVALID_PARAMETER; return FALSE; }
     if (cpus > 64) cpus = 64;
     ULONG_PTR masks[64];
-    int keys[64][2];
+    const ULONG_PTR possible = cpus == 64 ? ~(ULONG_PTR)0 : ((ULONG_PTR)1 << cpus) - 1;
+    ULONG_PTR seen = 0;
     for (int i = 0; i < cpus; i++) {
         char p[128];
-        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
-        core_of[i] = read_int(p);
-        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", i);
-        pkg_of[i] = read_int(p);
-        if (core_of[i] < 0) core_of[i] = i, pkg_of[i] = 0;
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_cpus_list", i);
+        ULONG_PTR mask = read_cpu_list(p);
+        if (!mask) {
+            snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", i);
+            mask = read_cpu_list(p);
+        }
+        /* An incomplete or contradictory map must not invent siblings or reserve unrelated CPUs. The caller
+           can continue without affinity pinning when topology is unavailable. */
+        if (!(mask & ((ULONG_PTR)1 << i)) || (mask & ~possible)) {
+            last_error = ERROR_INVALID_PARAMETER;
+            return FALSE;
+        }
         int k = 0;
-        while (k < n && (keys[k][0] != pkg_of[i] || keys[k][1] != core_of[i])) k++;
-        if (k == n) keys[n][0] = pkg_of[i], keys[n][1] = core_of[i], masks[n] = 0, n++;
-        masks[k] |= (ULONG_PTR)1 << i;
+        while (k < n && masks[k] != mask) k++;
+        if (k == n) {
+            if (mask & seen) { last_error = ERROR_INVALID_PARAMETER; return FALSE; }
+            masks[n++] = mask;
+            seen |= mask;
+        }
     }
     const DWORD need = (DWORD)(n * sizeof *info);
     if (*len < need) { *len = need; last_error = 122; return FALSE; }

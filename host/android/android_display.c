@@ -124,7 +124,7 @@ void hos_display_start(void) {
     CloseHandle(CreateThread(NULL, 0, renderer_when_window, NULL, 0, NULL));
 }
 
-/* android_main's loop calls hos_android_pump itself (it owns the input queue); this stays for shape parity with
+/* android_main's native_app_glue loop owns the input queue; this stays for shape parity with
    the Linux display — never called on Android */
 void hos_display_loop(void) {
     for (;;) Sleep(1000);

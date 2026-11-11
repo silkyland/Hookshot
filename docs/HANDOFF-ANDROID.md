@@ -1,5 +1,9 @@
 # Android bring-up — session handoff (2026-11-08)
 
+> Latest checkpoint: read [2026-11-11 Linux handoff](HANDOFF-ANDROID-2026-11-11.md) and
+> [measured findings](FINDINGS-ANDROID-2026-11-11.md). This older document is historical; its SoC identity,
+> USB status and launch component are not the current source of truth.
+
 ## Where we are
 
 The game **boots on the tablet** (Xiaomi Pad 7 Pro, Snapdragon 8 Gen 2 / Adreno 735,

@@ -1,4 +1,4 @@
-/* (android) Input: the AInputQueue's key and motion events, pumped by hos_display_loop on the android_main
+/* (android) Input: the AInputQueue's key and motion events, dispatched by native_app_glue on the android_main
    thread, become (a) hos_posix_keys[] (Windows VK codes: nn_hid.c's keyboard binds, the Insert menu's keys) and
    (b) the gamepad state hos_sdl_pads() reports to nn_hid.c's pads_read(): buttons as 1 << HOS_PAD_* positions and
    sticks as int32_t +-32767, exactly what pad_sdl.c produces on Linux. Touch overlay input lands in the same
@@ -27,7 +27,6 @@ extern struct android_app *hos_android_app;
 
 /* ---- the pad state, shared with the pump (written here, read by pads_read on the game thread) ---- */
 static pthread_mutex_t in_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t pad_buttons;            /* 1 << HOS_PAD_* */
 static int32_t pad_stick[4];            /* LX LY RX RY, +-32767 */
 static int pad_connected;
 static uint64_t key_buttons;            /* gamepad buttons held, by HOS_PAD_* (from key events) */
@@ -99,7 +98,7 @@ static void key_event(int code, int down) {
     pthread_mutex_unlock(&in_mu);
 }
 
-/* ---- motion: touch pointers (ignored here: the touch overlay reads them itself) and gamepad axes ---- */
+/* ---- motion: the Java overlay owns touchscreen pointers; native code reads physical gamepads ---- */
 static int32_t axis_to_stick(float v) {
     if (v > 1.0f) v = 1.0f;
     if (v < -1.0f) v = -1.0f;
@@ -111,13 +110,13 @@ static void motion_event(AInputEvent *e) {
     if (!(source & AINPUT_SOURCE_GAMEPAD) && !(source & AINPUT_SOURCE_JOYSTICK) &&
         !(source & AINPUT_SOURCE_DPAD))
         return;   /* touch/screen pens: the overlay's own path */
-    pad_connected = 1;
     /* axes: pointer 0 carries them */
     for (int a = 0; a < 32; a++) {
         float v = AMotionEvent_getAxisValue(e, a, 0);
         if (v != 0.0f || axis_val[a] != 0.0f) axis_val[a] = v;
     }
     pthread_mutex_lock(&in_mu);
+    pad_connected = 1;
     /* sticks: X/Y left, Z/RZ right (the common Android gamepad layout; per-device quirks are a later mapping) */
     pad_stick[0] = axis_to_stick(axis_val[AMOTION_EVENT_AXIS_X]);
     pad_stick[1] = axis_to_stick(-axis_val[AMOTION_EVENT_AXIS_Y]);   /* screen Y is down, stick Y is up */
@@ -144,21 +143,31 @@ static void stick_max_local(int32_t *dst, const int32_t *src) {
         if ((src[i] < 0 ? -src[i] : src[i]) > (dst[i] < 0 ? -dst[i] : dst[i])) dst[i] = src[i];
 }
 
-/* ---- the pump: every queued input event, on the android_main thread ---- */
-void hos_android_pump(void) {
-    if (!hos_android_app || !hos_android_app->inputQueue) return;
-    AInputEvent *e = NULL;
-    while (AInputQueue_getEvent(hos_android_app->inputQueue, &e) >= 0) {
-        const int32_t type = AInputEvent_getType(e);
-        if (type == AINPUT_EVENT_TYPE_KEY) {
-            const int action = AKeyEvent_getAction(e);
-            key_event(AKeyEvent_getKeyCode(e), action == AKEY_EVENT_ACTION_DOWN || action == AKEY_EVENT_ACTION_MULTIPLE);
-        } else if (type == AINPUT_EVENT_TYPE_MOTION) {
-            hos_android_touch_event(e);   /* touch pointers: android_touch.c */
-            motion_event(e);              /* gamepad axes: returns early for touch sources */
-        }
-        AInputQueue_finishEvent(hos_android_app->inputQueue, e, 1);
+int32_t hos_android_input_event(struct android_app *app, AInputEvent *e) {
+    (void)app;
+    const int32_t type = AInputEvent_getType(e);
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        const int action = AKeyEvent_getAction(e);
+        key_event(AKeyEvent_getKeyCode(e), action == AKEY_EVENT_ACTION_DOWN || action == AKEY_EVENT_ACTION_MULTIPLE);
+        return 1;
     }
+    if (type == AINPUT_EVENT_TYPE_MOTION) {
+        const int source = AInputEvent_getSource(e);
+        if ((source & AINPUT_SOURCE_GAMEPAD) || (source & AINPUT_SOURCE_JOYSTICK) || (source & AINPUT_SOURCE_DPAD)) {
+            motion_event(e);
+            return 1;
+        }
+    }
+    return 0;
+}
+void hos_android_input_reset(void) {
+    pthread_mutex_lock(&in_mu);
+    key_buttons = 0;
+    memset(pad_stick, 0, sizeof pad_stick);
+    memset(axis_val, 0, sizeof axis_val);
+    memset((void *)hos_posix_keys, 0, 256);
+    pthread_mutex_unlock(&in_mu);
+    hos_touch_reset();
 }
 
 /* ---- what nn_hid.c's pads_read() calls (pad_sdl.c's place on Android) ----
@@ -167,21 +176,19 @@ void hos_android_pump(void) {
 int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
     extern int hos_touch_active(void);          /* android_touch.c: the overlay's own state, OR'd in */
     extern void hos_touch_pads(uint64_t *b, int32_t s[4]);
-    static uint64_t tb;
-    static int32_t ts[4];
+    uint64_t tb = 0;
+    int32_t ts[4] = {0};
     pthread_mutex_lock(&in_mu);
     uint64_t b = key_buttons;
     int32_t s[4] = {pad_stick[0], pad_stick[1], pad_stick[2], pad_stick[3]};
     const int conn = pad_connected;
     pthread_mutex_unlock(&in_mu);
-    tb = 0;
-    memset(ts, 0, sizeof ts);
     hos_touch_pads(&tb, ts);
     b |= tb;
-    for (int i = 0; i < 4; i++) stick_max_local(s, ts);
+    stick_max_local(s, ts);
     *buttons |= b;
-    for (int i = 0; i < 4; i++) stick_max_local(stick, s);
+    stick_max_local(stick, s);
     return conn || hos_touch_active() ? 1 : 0;
 }
-void hos_sdl_pads_pump(void) { hos_android_pump(); }
+void hos_sdl_pads_pump(void) {}   /* native_app_glue dispatches on its own thread */
 void hos_sdl_rumble(float low, float high) { (void)low, (void)high; }   /* no standard Android gamepad FF */

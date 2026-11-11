@@ -88,9 +88,18 @@ static void on_app_cmd(struct android_app *app, int32_t cmd) {
         ALOGI("surface ready %dx%d", hos_posix_window[1], hos_posix_window[2]);
         break;
     case APP_CMD_TERM_WINDOW:
+        hos_android_input_reset();
         hos_android_window = NULL;
         hos_posix_window[0] = 0;
         ALOGI("surface gone");
+        break;
+    case APP_CMD_GAINED_FOCUS:
+        hos_posix_window[0] = 1;
+        break;
+    case APP_CMD_LOST_FOCUS:
+    case APP_CMD_PAUSE:
+        hos_posix_window[0] = 0;
+        hos_android_input_reset();
         break;
     case APP_CMD_DESTROY:
         hos_android_quit = 1;
@@ -144,7 +153,7 @@ void android_main(struct android_app *app) {
     hos_android_app = app;
     app->userData = NULL;
     app->onAppCmd = on_app_cmd;
-    app->onInputEvent = NULL;   /* android_input.c pumps the queue itself */
+    app->onInputEvent = hos_android_input_event;   /* native_app_glue is the queue's only reader */
 
     BootArg *arg = calloc(1, sizeof *arg);
     data_dir(arg->dir, sizeof arg->dir);
@@ -160,8 +169,7 @@ void android_main(struct android_app *app) {
         return;
     }
 
-    /* android_main's loop: surface lifecycle plus the input pump (the display's loop calls the pump itself,
-       but commands must be drained here too — the glue delivers them on this looper) */
+    /* Surface lifecycle and input both run through native_app_glue on this looper. */
     int events;
     struct android_poll_source *source;
     while (!hos_android_quit) {
@@ -172,7 +180,6 @@ void android_main(struct android_app *app) {
                 hos_android_quit = 1;
             }
         }
-        hos_android_pump();   /* input events, drained on the thread that owns the queue */
         usleep(10000);
     }
     pthread_join(game, NULL);

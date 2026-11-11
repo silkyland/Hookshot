@@ -5,6 +5,7 @@ plugins {
 android {
     namespace 'dev.hookshot.pokopia'
     compileSdk 36
+    sourceSets.main.java.srcDirs += '../../android-common/src/main/java'
 
     defaultConfig {
         applicationId "dev.hookshot.pokopia"

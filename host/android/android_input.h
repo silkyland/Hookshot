@@ -7,7 +7,8 @@
 
 extern struct android_app *hos_android_app;
 extern ANativeWindow *hos_android_window;
-extern void hos_android_pump(void);   /* every queued AInputEvent, once */
-extern void hos_android_touch_event(AInputEvent *e);   /* android_touch.c */
+int32_t hos_android_input_event(struct android_app *app, AInputEvent *event);
+void hos_android_input_reset(void);
+void hos_touch_reset(void);
 
 #endif

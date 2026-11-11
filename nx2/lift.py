@@ -25,6 +25,7 @@ import capstone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # (python -I leaves the script folder off)
 import kit
+import titles
 import nso2  # noqa: F401  (DT_RELR)
 import insn
 import lift_fixes
@@ -129,8 +130,13 @@ def main():
     a.exefs = a.exefs or kit.need_exefs()
     t0 = time.time()
     hle = ()
+    title_name, title = titles.resolve(None, a.exefs, a.work)
     if a.standalone:
         hle, stubbed = standalone.hle_set(nso.load_exefs(a.exefs))
+        unhle = getattr(title, "UNHLE", set())
+        if unhle:
+            hle -= unhle
+            print("title %s: %d HLEs lifted real instead (%s)" % (title_name, len(unhle), ", ".join(sorted(unhle))))
         print("standalone: %d HLE functions in host/, %d OS-facing imports stubbed" % (len(hle), len(stubbed)))
         hle = hle | stubbed
     img = eden_image.EdenImage(a.exefs, a.aslr, hle=hle) if a.layout == "eden" else nx_image.NxImage(a.exefs)
@@ -172,8 +178,13 @@ def main():
             poll.install()
         gen = os.path.join(out_dir, "gen")
         files = chunks.write(L, gen, os.path.join(a.work, "image"), a.rechunk and not a.standalone)
-        import oot_patches
-        oot_patches.apply(gen)
+        if title.PATCH_MODULE:
+            __import__(title.PATCH_MODULE).apply(gen)
+            print("title %s: %s applied" % (title_name, title.PATCH_MODULE))
+        else:
+            print("title %s: no generated-C patches" % title_name)
+        with open(os.path.join(a.work, "title"), "w") as f:
+            f.write(title_name + "\n")
         a64_rtgen.write(gen)
         if a.standalone:
             start, exit_ = standalone.write_image_c(gen, img, meta, a.exefs)

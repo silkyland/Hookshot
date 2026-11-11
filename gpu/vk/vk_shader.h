@@ -57,6 +57,8 @@ struct Program {
     };
     std::vector<Answer> answers;
     uint64_t variant = 0;   // (a hash of the answers: key alone names all the variants of these stages)
+    uint32_t depth_mode = 0;   // (hookshot) the nvn depth mode (near = -w) its vertex stages were translated for:
+                               // a game that switches modes gets a variant per mode (Pokopia: near = -w, then near = 0)
 };
 
 enum class ProgramKind { Graphics, Compute, Mesh };

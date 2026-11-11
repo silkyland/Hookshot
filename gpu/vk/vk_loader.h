@@ -5,6 +5,10 @@
 #ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #define VKX_WIN32_SURFACE(X) X(vkCreateWin32SurfaceKHR)
+#elif defined(__ANDROID__)
+#define VK_USE_PLATFORM_ANDROID_KHR
+#define VKX_WIN32_SURFACE(X) X(vkCreateAndroidSurfaceKHR)   /* (android: ANativeWindow, host/android/) */
+/* (<vulkan/vulkan.h> pulls in vulkan_android.h itself for VK_USE_PLATFORM_ANDROID_KHR) */
 #else
 #define VKX_WIN32_SURFACE(X)   /* (linux: SDL makes the surface, host/posix/display_sdl.c) */
 #endif

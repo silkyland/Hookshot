@@ -513,10 +513,15 @@ std::string pcache_path;
 std::atomic<int64_t> pcache_built_since_save{0};
 void pcache_init() {
     if (pcache) return;
-    char exe[MAX_PATH];
-    const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
-    std::string dir(exe, n);
-    dir = dir.substr(0, dir.find_last_of("\\/") + 1);
+    std::string dir;
+    if (const char* data = getenv("HOOKSHOT_ANDROID_DATA"))   // (android: the native lib dir is read-only)
+        dir = std::string(data) + "/";
+    else {
+        char exe[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        dir = std::string(exe, n);
+        dir = dir.substr(0, dir.find_last_of("\\/") + 1);
+    }
     pcache_path = dir + "mkw_vk_pipelines.bin";
     std::vector<uint8_t> data;
     if (FILE* f = fopen(pcache_path.c_str(), "rb")) {

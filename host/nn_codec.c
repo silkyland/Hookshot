@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <opus.h>
+#include <opus_multistream.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -119,4 +120,11 @@ HLE(_ZN2nn5codec33DecodeOpusInterleavedWithHardwareEPNS0_23HardwareOpusDecoderTy
     if (ARG(1)) G64(ARG(1)) = 8 + (uint64_t)len;
     if (ARG(2)) G32(ARG(2)) = (uint32_t)n;
     RET(0);
+}
+
+/* GetHardwareOpusMultiStreamDecoderWorkBufferSize(rate, channels, streams, coupled, option): the game
+   allocates it; libopus's own multi-stream decoder state size (the option word is the SDK's, unused here) */
+HLE(_ZN2nn5codec47GetHardwareOpusMultiStreamDecoderWorkBufferSizeEiiiii) {
+    const int size = opus_multistream_decoder_get_size((int)ARG(2), (int)ARG(3));
+    RET((uint64_t)(size > 0 ? size : 0x10000));
 }

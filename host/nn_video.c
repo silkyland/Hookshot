@@ -69,7 +69,12 @@ static DWORD WINAPI av1_notice(LPVOID unused) {
 /* (hookshot) host/mf_av1.c: AV1 on Media Foundation, as the static FFmpeg has no AV1 decoder */
 typedef void (*mf_av1_picture_fn)(void *user, const uint8_t *y, const uint8_t *uv, int w, int h, int stride, int64_t pts);
 void *mf_av1_open(int w, int h);
+#ifdef __ANDROID__
+void mf_av1_poll(void *m, mf_av1_picture_fn fn, void *user);
+int mf_av1_decode(void *m, const uint8_t *data, size_t n, int64_t pts, mf_av1_picture_fn fn, void *user);
+#else
 void mf_av1_decode(void *m, const uint8_t *data, size_t n, int64_t pts, mf_av1_picture_fn fn, void *user);
+#endif
 void mf_av1_flush(void *m);
 void mf_av1_close(void *m);
 
@@ -266,11 +271,23 @@ static void picture_free(Picture *p) {
     free(p->rgba), free(p->nv12);
     memset(p, 0, sizeof *p);
 }
+#ifdef __ANDROID__
+static void av_packet_free_raw(AVPacket **pkt) {
+    if (!pkt || !*pkt) return;
+    free((*pkt)->data);
+    free(*pkt);
+    *pkt = NULL;
+}
+#endif
 static void pending_free(Dec *d) {
     while (d->phead) {
         Pending *n = d->phead;
         d->phead = n->next;
+#ifdef __ANDROID__
+        av_packet_free_raw(&n->pkt);
+#else
         av_packet_free(&n->pkt);
+#endif
         free(n);
     }
     d->ptail = NULL;
@@ -349,46 +366,83 @@ static void drain(Dec *d) {
    it is next, pictures queued or not: the last picture decoded must carry the last flag, as the hardware's does. Media
    Foundation's decoder holds nothing back, so waiting for an empty queue gave the flag only to a buffer handed out
    again, with an older picture's pts, after the real last one went out unmarked */
-static void decode_next(Dec *d);
+static int decode_next(Dec *d);
 static void decode_pending(Dec *d) {
-    while (d->phead && (!d->qn || !d->phead->pkt)) decode_next(d);
+    while (d->phead && (!d->qn || !d->phead->pkt))
+        if (!decode_next(d)) break;
 }
 /* one submission decoded (its pictures into the queue, if any) */
-static void decode_next(Dec *d) {
-    if (d->phead) {
-        Pending *n = d->phead;
-        d->phead = n->next;
-        if (!d->phead) d->ptail = NULL;
-        if (d->mf) {   /* (hookshot) */
-            if (n->pkt) {
-                d->eos = 0;
-                mf_av1_decode(d->mf, n->pkt->data, (size_t)n->pkt->size, n->pkt->pts, mf_picture, d);
-                av_packet_free(&n->pkt);
-            } else {
-                mf_av1_decode(d->mf, NULL, 0, 0, mf_picture, d);
-                d->eos = 1;
-                d->log_submits = 8;   /* (data after the end: a restart, worth seeing) */
-                if (d->qn) d->queue[(d->qhead + d->qn - 1) % MAX_QUEUE].last = 1;
-            }
-        } else if (n->pkt) {
-            d->eos = 0;
-            if (avcodec_send_packet(d->ctx, n->pkt) == AVERROR(EAGAIN)) {   /* (full: its pictures out first) */
-                drain(d);
-                avcodec_send_packet(d->ctx, n->pkt);
-            }
-            drain(d);
-            av_packet_free(&n->pkt);
-        } else {   /* (the end: the rest out, the last picture marked) */
-            avcodec_send_packet(d->ctx, NULL);
-            drain(d);
-            d->eos = 1;
-            d->log_submits = 8;
-            if (d->qn) d->queue[(d->qhead + d->qn - 1) % MAX_QUEUE].last = 1;
-            avcodec_flush_buffers(d->ctx);   /* (a stream after it starts again) */
-        }
-        free(n);
-    }
+static void pending_requeue_front(Dec *d, Pending *n) {
+    n->next = d->phead;
+    d->phead = n;
+    if (!d->ptail) d->ptail = n;
 }
+static int decode_next(Dec *d) {
+    if (!d->phead) return 0;
+    Pending *n = d->phead;
+    d->phead = n->next;
+    if (!d->phead) d->ptail = NULL;
+    if (d->mf) {   /* (hookshot) */
+        if (n->pkt) {
+            d->eos = 0;
+#ifdef __ANDROID__
+            if (!mf_av1_decode(d->mf, n->pkt->data, (size_t)n->pkt->size, n->pkt->pts, mf_picture, d)) {
+                pending_requeue_front(d, n);
+                return 0;
+            }
+#else
+            mf_av1_decode(d->mf, n->pkt->data, (size_t)n->pkt->size, n->pkt->pts, mf_picture, d);
+#endif
+#ifdef __ANDROID__
+            av_packet_free_raw(&n->pkt);
+#else
+            av_packet_free(&n->pkt);
+#endif
+        } else {
+#ifdef __ANDROID__
+            if (!mf_av1_decode(d->mf, NULL, 0, 0, mf_picture, d)) {
+                pending_requeue_front(d, n);
+                return 0;
+            }
+#else
+            mf_av1_decode(d->mf, NULL, 0, 0, mf_picture, d);
+#endif
+            d->eos = 1;
+            d->log_submits = 8;   /* (data after the end: a restart, worth seeing) */
+            if (d->qn) d->queue[(d->qhead + d->qn - 1) % MAX_QUEUE].last = 1;
+        }
+    } else if (n->pkt) {
+        d->eos = 0;
+        if (avcodec_send_packet(d->ctx, n->pkt) == AVERROR(EAGAIN)) {   /* (full: its pictures out first) */
+            drain(d);
+            avcodec_send_packet(d->ctx, n->pkt);
+        }
+        drain(d);
+        av_packet_free(&n->pkt);
+    } else {   /* (the end: the rest out, the last picture marked) */
+        avcodec_send_packet(d->ctx, NULL);
+        drain(d);
+        d->eos = 1;
+        d->log_submits = 8;
+        if (d->qn) d->queue[(d->qhead + d->qn - 1) % MAX_QUEUE].last = 1;
+        avcodec_flush_buffers(d->ctx);   /* (a stream after it starts again) */
+    }
+    free(n);
+    return 1;
+}
+#ifdef __ANDROID__
+/* (android: the MediaCodec path needs only data/size/pts; these packets are owned and freed locally) */
+static AVPacket *av_packet_raw(const void *data, size_t n, int64_t pts) {
+    AVPacket *p = (AVPacket *)calloc(1, sizeof(AVPacket));
+    uint8_t *b = (uint8_t *)malloc(n ? n : 1);
+    if (!p || !b) { free(p), free(b); return NULL; }
+    p->data = b;
+    p->size = (int)n;
+    p->pts = pts;
+    memcpy(b, data, n);
+    return p;
+}
+#endif
 static void pending_push(Dec *d, AVPacket *pkt) {
     Pending *n = (Pending *)calloc(1, sizeof *n);
     n->pkt = pkt;
@@ -465,18 +519,39 @@ static uint64_t submitted(void) {   /* a submission: every handle given out befo
 
 static void dec_submit(Ctx *c) {
     Dec *d = (Dec *)host_of(ARG(1), DEC_MAGIC);
+    const int mf = d && d->mf && !d->ctx;
     const uint64_t id = submitted();
     if (ARG(0)) G64(ARG(0)) = id;
-    if (!d || (!d->ctx && !d->mf)) { RET(0); return; }
+    if (!d) { RET(0); return; }
     AcquireSRWLockExclusive(&d->lock);
+    if (!d->ctx && !d->mf) {
+        /* Android has no AV1/VP9 FFmpeg decoder yet. Keep the movie API's syncs moving and mark EOS so
+           the game is not stuck waiting for intro frames that will never come. */
+        d->submits++;
+        d->eos = (ARG(5) & 1) != 0;
+        if (d->eos) {
+            d->last_pts = (int64_t)ARG(4);
+            d->log_submits = 8;
+        }
+        ReleaseSRWLockExclusive(&d->lock);
+        RET(0);
+        return;
+    }
     if (ARG(2) && ARG(3)) {
-        AVPacket *pkt = av_packet_alloc();
-        if (pkt && av_new_packet(pkt, (int)ARG(3)) == 0) {
-            memcpy(pkt->data, GP(ARG(2)), (size_t)ARG(3));
-            pkt->pts = (int64_t)ARG(4);
-            pending_push(d, pkt);
-        } else {
-            av_packet_free(&pkt);
+#ifdef __ANDROID__
+        AVPacket *pkt = mf ? av_packet_raw(GP(ARG(2)), (size_t)ARG(3), (int64_t)ARG(4)) : NULL;
+        if (mf) { if (pkt) pending_push(d, pkt); }
+        else
+#endif
+        {
+            AVPacket *pkt = av_packet_alloc();
+            if (pkt && av_new_packet(pkt, (int)ARG(3)) == 0) {
+                memcpy(pkt->data, GP(ARG(2)), (size_t)ARG(3));
+                pkt->pts = (int64_t)ARG(4);
+                pending_push(d, pkt);
+            } else {
+                av_packet_free(&pkt);
+            }
         }
     }
     d->submits++;
@@ -530,11 +605,17 @@ static void dec_acquire(Ctx *c) {
        by another thread's submission; then a free buffer as it was, so the caller is never refused) */
     AcquireSRWLockExclusive(&d->lock);
     decode_pending(d);
+#ifdef __ANDROID__
+    if (d->mf) mf_av1_poll(d->mf, mf_picture, d);
+#endif
     for (int tries = 0; !d->qn && !d->eos && tries < 50; tries++) {
         ReleaseSRWLockExclusive(&d->lock);
         hos_sleep_ns(2000000);
         AcquireSRWLockExclusive(&d->lock);
         decode_pending(d);
+#ifdef __ANDROID__
+        if (d->mf) mf_av1_poll(d->mf, mf_picture, d);
+#endif
     }
     int slot = -1;
     for (int i = 0; i < MAX_SLOTS && slot < 0; i++)
@@ -551,8 +632,10 @@ static void dec_acquire(Ctx *c) {
         const int idle = !d->eos && !d->phead;   /* (nothing will come into this buffer: its sync is not reached) */
         if (idle && ARG(1))
             G64(ARG(1)) = SYNC_IDLE_TAG | ((uint64_t)InterlockedCompareExchange64(&submissions, 0, 0) & SYNC_IDLE_MASK);
-        if (video_log()) hos_log("video: acquire %lld: nothing decoded%s, buffer %d again", (long long)d->acquires,
-                                 d->eos ? " (the end)" : idle ? " (idle: its sync not reached)" : "", slot);
+        static volatile LONG idle_logged;
+        if (video_log() && InterlockedIncrement(&idle_logged) <= 8)
+            hos_log("video: acquire %lld: nothing decoded%s, buffer %d again", (long long)d->acquires,
+                    d->eos ? " (the end)" : idle ? " (idle: its sync not reached)" : "", slot);
         ReleaseSRWLockExclusive(&d->lock);
         if (ARG(0)) G32(ARG(0)) = (uint32_t)slot;
         RET(0);
@@ -571,8 +654,7 @@ static void dec_acquire(Ctx *c) {
             const int64_t due = d->clock_pts + (now - d->clock_ns);
             if (d->queue[d->qhead].pts + late >= due) break;
             if (d->qn < 2) {
-                if (!d->phead) break;
-                decode_next(d);
+                if (!decode_next(d)) break;
                 continue;
             }
             picture_free(&d->queue[d->qhead]);

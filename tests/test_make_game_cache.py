@@ -30,7 +30,7 @@ class ExtractionFailed(Exception):
 def module_bytes(supported=True, payload=b"new authored module"):
     header = bytearray(0x60)
     header[:4] = b"NSO0"
-    header[0x40:0x44] = bytes.fromhex(make_game.BUILD_ID if supported else "01234567")
+    header[0x40:0x44] = bytes.fromhex(make_game.titles.TITLES["oot"].BUILD_ID if supported else "01234567")
     return bytes(header) + payload
 
 
@@ -150,7 +150,7 @@ class NupCacheTests(unittest.TestCase):
             self.run_to_lift(self.new_nup, supported=False)
         self.assertEqual(self.extractions, [self.new_nup])
         self.assertEqual(result.exception.code, 1)
-        self.assertIn("This is build 01234567. Hookshot supports build %s." % make_game.BUILD_ID, self.output)
+        self.assertIn("This is build 01234567. Hookshot supports: %s." % make_game.titles.known_builds(), self.output)
         self.assertEqual(self.cache(), before)
 
     def test_missing_romfs_preserves_the_previous_cache_and_save(self):

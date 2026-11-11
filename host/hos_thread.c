@@ -12,7 +12,14 @@
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION   /* (older Windows SDKs lack it: Windows 10 1803 and later take it) */
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
+#if defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
+#define cpu_pause() _mm_pause()
+#elif defined(__aarch64__)
+#define cpu_pause() __asm__ volatile("yield" ::: "memory")
+#else
+#define cpu_pause() ((void)0)
+#endif
 #ifdef __EMSCRIPTEN__
 #include <sched.h>
 #include <stdatomic.h>
@@ -808,7 +815,7 @@ static int present_poll(Ctx *c, int64_t ns) {
     const int64_t end = hos_now_ns() + ns;
     while (v != 1 && hos_now_ns() < end) {
         SwitchToThread();
-        for (int i = 0; i < 64; i++) _mm_pause();
+        for (int i = 0; i < 64; i++) cpu_pause();
         hos_nvn_event_value(ev, &v);
     }
     if (away) hos_vcore_back();
@@ -878,8 +885,9 @@ HLE(_ZN2nn2os13GetSystemTickEv) {
     if (on < 0) on = getenv("HOS_TICK_LOG") != NULL;
     if (on) tick_log(c->x[30]);
     /* (hookshot) The graphics module: x19 at its frame-end clock read (main+0x346c770 is after the bl), for nn_vi.c's
-       real-time step */
-    if (c->x[30] == 0x8348c770) hos_gfx_module = c->x[19];
+       real-time step. OoT's address only: on another title a coincidental LR would point nn_vi.c's writes at
+       whatever x19 holds there */
+    if (hos_game_title() == HOS_TITLE_OOT && c->x[30] == 0x8348c770) hos_gfx_module = c->x[19];
     RET(hos_ticks());
 }
 HLE(_ZN2nn2os22GetSystemTickFrequencyEv) { RET(HOS_TICK_HZ); }

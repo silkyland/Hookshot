@@ -996,7 +996,7 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
 
 // (hookshot) The page table of guest memory for pointers no bound buffer holds: 4 KB pages from this base, a device address each
 constexpr unsigned long long kGuestPagesBase = 0x1000000000ull;
-constexpr unsigned long long kGuestPagesBytes = 8ull << 30;
+constexpr unsigned long long kGuestPagesBytes = 64ull << 30;
 // (a second window, its entries after the first's: the pools the game's GPU allocator puts at 0x7fxxxxxxxx, where its storage
 // buffers are. Pointers there read 0 with the first alone)
 constexpr unsigned long long kGuestPagesBase2 = 0x7f00000000ull;

@@ -593,7 +593,7 @@ static uint32_t ioctl_ctrl_gpu(uint32_t nr, uint64_t p, uint64_t out2, uint64_t 
     return NV_NOT_IMPLEMENTED;
 }
 
-static uint32_t ioctl(Ctx *c, int fd, uint32_t cmd, uint64_t buf, uint64_t x2, uint64_t x2size) {
+static uint32_t svc_ioctl(Ctx *c, int fd, uint32_t cmd, uint64_t buf, uint64_t x2, uint64_t x2size) {
     if (fd < 0 || fd >= 256 || !fds[fd].type) return NV_BAD_PARAMETER;
     uint32_t nr = cmd & 0xFF, group = (cmd >> 8) & 0xFF;
     uint64_t size = (cmd >> 16) & 0x3FFF;
@@ -634,11 +634,11 @@ HLE(NvOsDrvOpen) {
 }
 HLE(NvOsDrvClose) { int fd = (int)ARG(0); if (fd > 0 && fd < 256) fds[fd].type = 0; RET(0); }
 /* NvOsDrvIoctl(int fd, u32 cmd, void* buf) */
-HLE(NvOsDrvIoctl) { RET(ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), 0, 0)); }
+HLE(NvOsDrvIoctl) { RET(svc_ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), 0, 0)); }
 /* NvOsDrvIoctl2(int fd, u32 cmd, void* buf, ?, void const* in2, size in2) */
-HLE(NvOsDrvIoctl2) { RET(ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), ARG(4), ARG(5))); }
+HLE(NvOsDrvIoctl2) { RET(svc_ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), ARG(4), ARG(5))); }
 /* NvOsDrvIoctl3(int fd, u32 cmd, void* buf, ?, void* out2, size out2) */
-HLE(NvOsDrvIoctl3) { RET(ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), ARG(4), ARG(5))); }
+HLE(NvOsDrvIoctl3) { RET(svc_ioctl(c, (int)ARG(0), (uint32_t)ARG(1), ARG(2), ARG(4), ARG(5))); }
 /* NvOsDrvMapSharedMem(int fd, handle, size) */
 HLE(NvOsDrvMapSharedMem) { RET(0); }
 /* NvOsDrvQueryEvent(int fd, u32 event id, os::SystemEventType*) */

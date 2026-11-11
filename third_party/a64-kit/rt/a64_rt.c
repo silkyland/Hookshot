@@ -229,6 +229,7 @@ A64_WEAK void a64_unimplemented(Ctx *c, const char *sym, int *seen) {
         fprintf(stderr, "[a64] unimplemented import %s (lr %#llx)\n", sym, (unsigned long long)c->x[30]);
     }
     c->x[0] = 0;
+    c->vreg[0][0] = c->vreg[0][1] = 0;   /* float/double results read s0/d0, not x0 */
 }
 
 void recomp_unhandled(GuestContext *c, uint32_t insn, uint64_t pc) { a64_trap(c, pc, insn); }

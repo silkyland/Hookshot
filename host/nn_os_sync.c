@@ -1128,8 +1128,15 @@ HLE(_ZN2nn2os20TimedWaitSystemEventEPNS0_15SystemEventTypeENS_8TimeSpanE) {
     RET(logged_wait(c, obj(ARG(0), K_EVENT), (int64_t)ARG(1) > 0 ? (int64_t)ARG(1) : 1, (int64_t)ARG(1) <= 0, "system timed"));
 }
 /* Attaching kernel handles: without a kernel nothing ever signals them, which is what an idle device would do. */
-HLE(_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE) { event_init(ARG(0), 0, (int)ARG(3)); }
-HLE(_ZN2nn2os33AttachWritableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE) { event_init(ARG(0), 0, (int)ARG(3)); }
+/* (pokopia) a readable handle the applet manager vends (ICommonStateGetter::GetEventHandle) makes the event fire:
+   readable while the applet-message queue is non-empty (hos_svc.c ipc_handle_readable) */
+int ipc_handle_readable(uint32_t h);
+static void attach_handle_event(uint64_t event_key, uint64_t handle, uint64_t clear_mode) {
+    event_init(event_key, 0, (int)clear_mode);
+    if (ipc_handle_readable((uint32_t)handle)) event_signal(obj(event_key, K_EVENT));
+}
+HLE(_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE) { attach_handle_event(ARG(0), ARG(1), ARG(3)); }
+HLE(_ZN2nn2os33AttachWritableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14EventClearModeE) { attach_handle_event(ARG(0), ARG(1), ARG(3)); }
 HLE(_ZN2nn2os17AttachSystemEventEPNS0_15SystemEventTypeEjbjbNS0_14EventClearModeE) { event_init(ARG(0), 0, (int)ARG(5)); }
 HLE(_ZN2nn2os33DetachReadableHandleOfSystemEventEPNS0_15SystemEventTypeE) { RET(0xFFFF0001u); }
 HLE(_ZN2nn2os33DetachWritableHandleOfSystemEventEPNS0_15SystemEventTypeE) { RET(0xFFFF0002u); }

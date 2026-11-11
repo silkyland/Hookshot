@@ -105,6 +105,8 @@ static void put_handle(uint64_t obj, int kind, int index) {
 }
 static int au_trace = -1;   /* HOS_AUDIO_TRACE=1: the graph setup calls */
 #define AUT(...) do { if (au_trace < 0) au_trace = getenv("HOS_AUDIO_TRACE") != NULL; if (au_trace) hos_log(__VA_ARGS__); } while (0)
+static volatile int aout_running;                 /* an AudioOut is playing: the mixer thread runs for it too */
+static void aout_mix(float *l, float *r);         /* (below: nn::audio::AudioOut's streams into the final mix) */
 static int get_handle(uint64_t obj, int kind) {
     if (!obj) return -1;
     const uint64_t h = G64(obj);
@@ -542,6 +544,7 @@ static void render_frame(int16_t *pcm) {   /* 240 stereo frames */
             }
         }
     }
+    aout_mix(l, r);   /* (the game's own AudioOut PCM streams, mixed into the final pair) */
     if (lim_enabled)   /* fast attack, ~50 ms release */
         for (int i = 0; i < FRAME; i++) {
             const float x = fmaxf(fabsf(l[i]), fabsf(r[i])) * lim_in;
@@ -790,7 +793,7 @@ static DWORD WINAPI renderer_main(void *p) {
     for (;;) {
         hos_sleep_ns(next - hos_now_ns());
         next = audio_mix_deadline(hos_now_ns(), next, period);
-        if (!renderer_running) continue;
+        if (!renderer_running && !aout_running) continue;
         au_lock();
         if (ncmds && hos_now_ns() - last_update_ns > 50000000) commit();   /* (no update came: see "parameter updates") */
         render_frame(pcm);
@@ -1361,4 +1364,229 @@ HLE(_ZN2nn5audio25GetI3dl2ReverbInputOutputEPKNS0_15I3dl2ReverbTypeEPaS4_Pii) {
         *(int8_t *)GP(ARG(2) + k) = rv->out[k];
     }
     if (ARG(3)) G32(ARG(3)) = (uint32_t)n;
+}
+
+/* ---- AudioOut: nn::audio::AudioOut, the game's own PCM streams -----------------------------------
+   (Pokopia: movies, voice and music go through AudioOut, not the AudioRenderer mixer above.)
+
+   The game describes each buffer with SetAudioOutBufferInfo(AudioOutBuffer*, data, capacity, size), which
+   writes the descriptor's first 24 bytes {data, capacity, size}; AppendAudioOutBuffer queues it; the mixer
+   thread consumes the queue in order at 48 kHz and GetReleasedAudioOutBuffer hands the played buffer structs
+   back (their guest addresses, so the game's own fields stay meaningful). The stream's release SystemEvent
+   (the one OpenDefaultAudioOut got) signals when buffers come back. The guest AudioOut's first 16 bytes are
+   the SDK's own fields {s32 sampleRate, u32 channelCount, u32 sampleFormat, u32 state}, which code outside
+   the SDK reads directly; the host state lives beside them in a lookup table (put_handle would overwrite
+   those fields). */
+#define AOUT_MAX 8
+#define AOUT_Q 64
+#define AOUT_PCM16 2          /* nn::audio::SampleFormat::PcmInt16 */
+#define AOUT_STARTED 0        /* nn::audio::AudioOutState */
+#define AOUT_STOPPED 1
+
+typedef struct { uint64_t guest, data, size, pos; } AoutBuf;   /* pos: frames consumed of data */
+typedef struct {
+    int used, started, ch, rate;
+    float vol;
+    uint64_t event;          /* the release SystemEvent's key (its guest SystemEventType address), 0: none */
+    uint64_t guest;          /* the game's AudioOut* this state belongs to */
+    AoutBuf q[AOUT_Q]; int qh, qt;
+    AoutBuf rel[AOUT_Q]; int rh, rt;
+} Aout;
+static Aout aouts[AOUT_MAX];
+
+static Aout *aout_of(uint64_t guest) {
+    for (int i = 0; i < AOUT_MAX; i++)
+        if (aouts[i].used && aouts[i].guest == guest) return &aouts[i];
+    return NULL;
+}
+static void aout_fields(uint64_t guest, int ch, int state) {   /* the SDK's own first words */
+    if (!guest) return;
+    G32(guest) = 48000;
+    G32(guest + 4) = (uint32_t)ch;
+    G32(guest + 8) = AOUT_PCM16;
+    G32(guest + 12) = (uint32_t)state;
+}
+static void aout_release(Aout *a, const AoutBuf *b) {
+    if (a->rt - a->rh >= AOUT_Q) { hos_log("audio: AudioOut released queue full, a buffer dropped"); return; }
+    a->rel[a->rt++ & (AOUT_Q - 1)] = *b;
+}
+/* every queued buffer to the released ring (Stop / Flush / Close) */
+static void aout_release_all(Aout *a) {
+    while (a->qh != a->qt) {
+        aout_release(a, &a->q[a->qh & (AOUT_Q - 1)]);
+        a->qh++;
+    }
+}
+static void aout_signal(Aout *a) { if (a->event) hos_system_event_signal(a->event); }
+
+/* one output frame's worth of a buffer's PCM16, downmixed to stereo floats */
+static void aout_frame(const Aout *a, const AoutBuf *b, float *l, float *r) {
+    const int ch = a->ch < 1 ? 1 : a->ch > 8 ? 8 : a->ch;
+    const uint8_t *p = (const uint8_t *)GP(b->data + b->pos * (uint64_t)a->ch * 2);
+    int16_t s[8] = {0};
+    for (int i = 0; i < ch; i++) s[i] = *(const int16_t *)(p + i * 2);
+    float L, R;
+    if (a->ch <= 1) L = R = s[0] / 32768.0f;
+    else if (a->ch == 6) {   /* 5.1: FL FR FC LFE SL SR; the LFE is dropped, center and surrounds fold in */
+        L = (s[0] + 0.5f * s[2] + 0.5f * s[4]) / 32768.0f;
+        R = (s[1] + 0.5f * s[2] + 0.5f * s[5]) / 32768.0f;
+    } else {
+        L = s[0] / 32768.0f;
+        R = s[1] / 32768.0f;
+        for (int i = 2; i < ch; i++) {
+            if (i & 1) R += 0.5f * s[i] / 32768.0f;
+            else L += 0.5f * s[i] / 32768.0f;
+        }
+    }
+    *l = L * a->vol;
+    *r = R * a->vol;
+}
+
+/* the streams' share of one mixer frame; runs under au_lock from render_frame */
+static void aout_mix(float *l, float *r) {
+    int signaled = 0;
+    for (int i = 0; i < AOUT_MAX; i++) {
+        Aout *a = &aouts[i];
+        if (!a->used || !a->started) continue;
+        const uint64_t bpf = (uint64_t)a->ch * 2;   /* bytes per frame of PCM16 */
+        for (int f = 0; f < FRAME; f++) {
+            for (;;) {
+                if (a->qh == a->qt) break;
+                AoutBuf *b = &a->q[a->qh & (AOUT_Q - 1)];
+                if (b->pos * bpf < b->size) break;
+                aout_release(a, b);
+                a->qh++;
+                signaled = 1;
+            }
+            if (a->qh == a->qt) break;
+            AoutBuf *b = &a->q[a->qh & (AOUT_Q - 1)];
+            float L, R;
+            aout_frame(a, b, &L, &R);
+            b->pos++;
+            l[f] += L;
+            r[f] += R;
+        }
+    }
+    if (signaled)
+        for (int i = 0; i < AOUT_MAX; i++)
+            if (aouts[i].used && aouts[i].event && (aouts[i].rh != aouts[i].rt)) aout_signal(&aouts[i]);
+}
+
+/* AudioOutParameter { s32 sampleRate; u16 channelCount; u16 reserved } : 0 asks the device's 48 kHz stereo */
+HLE(_ZN2nn5audio27InitializeAudioOutParameterEPNS0_17AudioOutParameterE) { memset(GP(ARG(0)), 0, 8); }
+static void aout_open(Ctx *c, uint64_t guest, uint64_t event, uint64_t param) {
+    au_lock();
+    int slot = -1;
+    for (int i = 0; i < AOUT_MAX; i++) if (!aouts[i].used) { slot = i; break; }
+    if (slot < 0) { au_unlock(); RET(0x1); return; }   /* out of AudioOuts: a failure Result, not a crash */
+    Aout *a = &aouts[slot];
+    memset(a, 0, sizeof *a);
+    a->used = 1;
+    a->guest = guest;
+    a->vol = 1.0f;
+    a->rate = param ? (int)G32(param) : 0;
+    a->ch = param ? (int)*(uint16_t *)GP(param + 4) : 0;
+    if (!a->ch) a->ch = 2;
+    if (a->rate && a->rate != 48000) hos_log("audio: AudioOut asked for %d Hz; playing at 48 kHz", a->rate);
+    a->event = event;
+    if (a->event) hos_system_event_init(a->event, 1);
+    aout_fields(guest, a->ch, AOUT_STOPPED);
+    au_unlock();
+    hos_log("audio: AudioOut #%d open, %d channels", slot, a->ch);
+    RET(0);
+}
+HLE(_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventERKNS0_17AudioOutParameterE) {
+    aout_open(c, ARG(0), ARG(1), ARG(2));
+}
+HLE(_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutERKNS0_17AudioOutParameterE) {
+    /* the same open without a release event: the game polls GetReleasedAudioOutBuffer */
+    aout_open(c, ARG(0), 0, ARG(1));
+}
+HLE(_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    if (a) {
+        a->started = 1;
+        aout_fields(ARG(0), a->ch, AOUT_STARTED);
+        aout_running = 1;
+    }
+    au_unlock();
+    if (a && !renderer_thread) renderer_thread = CreateThread(NULL, 0, renderer_main, NULL, 0, NULL);
+    RET(0);
+}
+HLE(_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    if (a) {
+        a->started = 0;
+        aout_release_all(a);
+        aout_fields(ARG(0), a->ch, AOUT_STOPPED);
+    }
+    au_unlock();
+    if (a) aout_signal(a);
+}
+HLE(_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    if (a) {
+        a->started = 0;
+        aout_release_all(a);
+        a->used = 0;
+        aout_fields(ARG(0), a->ch, AOUT_STOPPED);
+    }
+    au_unlock();
+    if (a) aout_signal(a);
+}
+HLE(_ZN2nn5audio16GetAudioOutStateEPKNS0_8AudioOutE) { Aout *a = aout_of(ARG(0)); RET(a ? (a->started ? AOUT_STARTED : AOUT_STOPPED) : 0); }
+HLE(_ZN2nn5audio22GetAudioOutBufferCountEPKNS0_8AudioOutE) { Aout *a = aout_of(ARG(0)); RET(a ? (uint64_t)(a->qt - a->qh) : 0); }
+HLE(_ZN2nn5audio23GetAudioOutChannelCountEPKNS0_8AudioOutE) { Aout *a = aout_of(ARG(0)); RET(a ? a->ch : 2); }
+HLE(_ZN2nn5audio21GetAudioOutSampleRateEPKNS0_8AudioOutE) { Aout *a = aout_of(ARG(0)); RET(a && a->rate ? (uint64_t)a->rate : 48000); }
+HLE(_ZN2nn5audio23GetAudioOutSampleFormatEPKNS0_8AudioOutE) { RET(AOUT_PCM16); }
+HLE(_ZN2nn5audio15GetAudioOutNameEPKNS0_8AudioOutE) { RET((uint64_t)(uintptr_t)"DeviceOut"); }
+HLE(_ZN2nn5audio17SetAudioOutVolumeEPNS0_8AudioOutEf) {
+    Aout *a = aout_of(ARG(0));
+    if (a) a->vol = farg(c, 0);
+}
+HLE(_ZN2nn5audio17GetAudioOutVolumeEPKNS0_8AudioOutE) { Aout *a = aout_of(ARG(0)); ret_float(c, a ? a->vol : 1.0f); }
+/* the descriptor's first 24 bytes: {data, capacity, size} — the rest of the SDK's AudioOutBuffer is ours unused */
+HLE(_ZN2nn5audio21SetAudioOutBufferInfoEPNS0_14AudioOutBufferEPvmm) {
+    G64(ARG(0)) = ARG(1);
+    G64(ARG(0) + 8) = ARG(2);
+    G64(ARG(0) + 16) = ARG(3);
+}
+HLE(_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE) { RET(G64(ARG(0))); }
+HLE(_ZN2nn5audio25GetAudioOutBufferDataSizeEPKNS0_14AudioOutBufferE) { RET(G64(ARG(0) + 16)); }
+HLE(_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBufferE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    int ok = 0;
+    if (a && a->qt - a->qh < AOUT_Q) {
+        AoutBuf *b = &a->q[a->qt++ & (AOUT_Q - 1)];
+        b->guest = ARG(1);
+        b->data = G64(ARG(1));
+        b->size = G64(ARG(1) + 16);
+        b->pos = 0;
+        ok = 1;
+    }
+    au_unlock();
+    RET(ok);
+}
+HLE(_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    uint64_t guest = 0;
+    if (a && a->rh != a->rt) guest = a->rel[a->rh++ & (AOUT_Q - 1)].guest;
+    au_unlock();
+    RET(guest);
+}
+HLE(_ZN2nn5audio28GetAudioOutPlayedSampleCountEPKNS0_8AudioOutE) {
+    Aout *a = aout_of(ARG(0));
+    RET(a && a->qh != a->qt ? a->q[a->qh & (AOUT_Q - 1)].pos : 0);
+}
+HLE(_ZN2nn5audio19FlushAudioOutBuffersEPNS0_8AudioOutE) {
+    au_lock();
+    Aout *a = aout_of(ARG(0));
+    if (a) aout_release_all(a);
+    au_unlock();
+    if (a) aout_signal(a);
 }

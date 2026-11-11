@@ -1,0 +1,32 @@
+diff --git a/.github/workflows/source-regressions.yml b/.github/workflows/source-regressions.yml
+index 1f0d483..5ea021c 100644
+--- a/.github/workflows/source-regressions.yml
++++ b/.github/workflows/source-regressions.yml
+@@ -51,6 +51,8 @@ on:
+       - tests/test_changelog.py
+       - host/nn_audio.c
+       - tests/test_audio_deadline.py
++      - host/posix/win32_posix.c
++      - tests/test_cpu_topology.py
+       - host/pad_sdl.c
+       - tests/test_rumble_refresh.py
+       - tests/test_same_dyn.py
+@@ -124,6 +126,8 @@ on:
+       - tests/test_changelog.py
+       - host/nn_audio.c
+       - tests/test_audio_deadline.py
++      - host/posix/win32_posix.c
++      - tests/test_cpu_topology.py
+       - host/pad_sdl.c
+       - tests/test_rumble_refresh.py
+       - tests/test_same_dyn.py
+@@ -242,6 +246,9 @@ jobs:
+       - name: Check the audio mixer's catch-up
+         if: runner.os == 'Linux'
+         run: python -I -B tests/test_audio_deadline.py
++      - name: Check physical CPU topology across clusters and SMT
++        if: runner.os == 'Linux'
++        run: python -I -B tests/test_cpu_topology.py
+       - name: Check controller rumble keeps going
+         if: runner.os == 'Linux'
+         run: python -I -B tests/test_rumble_refresh.py

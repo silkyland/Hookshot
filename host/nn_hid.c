@@ -358,12 +358,18 @@ static void binds_load(void) {
     }
     binds_default();
     char path[MAX_PATH];
-    const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-    char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
+    const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
     FILE *f = NULL;
-    if (slash) {
-        snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+    if (data && *data) {
+        snprintf(path, sizeof path, "%s/hookshot_options.ini", data);
         f = fopen(path, "r");
+    } else {
+        const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+        char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
+        if (slash) {
+            snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+            f = fopen(path, "r");
+        }
     }
     int changed = 0;
     if (f) {
@@ -572,48 +578,73 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
 static void vibration_send(uint64_t handle, uint64_t value);
 volatile int64_t hos_hid_last_read;
 
-/* GetNpadStates(State* out, int count, unsigned int const& npadId): the latest state first */
-static void npad_states(Ctx *c) {
-    uint64_t out = ARG(0);
-    int count = (int)ARG(1);
-    uint32_t id = G32(ARG(2));
-    uint64_t buttons = 0;
-    int32_t stick[4] = {0};
-    int connected = id == NPAD_NO1;
+/* The buttons and sticks the controllers and the keyboard give now, for npad id (0 = No.1, the only one with
+   a device); the "no controller for 2 s" and "the game reads npad" notes live here too */
+static void npad_poll(Ctx *c, uint32_t id, uint64_t *buttons, int32_t stick[4], int *connected) {
+    *buttons = 0;
+    memset(stick, 0, 4 * sizeof *stick);
+    *connected = id == NPAD_NO1;
     {
         static int64_t last_read;
         static uint32_t seen_ids[16];
         static int nseen;
         const int64_t now = hos_now_ns();
-        if (connected && last_read && now - last_read > 2000000000LL)
+        if (*connected && last_read && now - last_read > 2000000000LL)
             hos_log("hid: the game read no controller for %.1f s (lr %#llx)", (now - last_read) / 1e9,
                     (unsigned long long)c->x[30]);
-        if (connected) last_read = hos_hid_last_read = now;
+        if (*connected) last_read = hos_hid_last_read = now;
         int known = 0;
         for (int i = 0; i < nseen; i++) known |= seen_ids[i] == id;
         if (!known && nseen < 16) {
             seen_ids[nseen++] = id;
-            hos_log("hid: the game reads npad %#x (%s, lr %#llx)", id, connected ? "No.1" : "not connected",
+            hos_log("hid: the game reads npad %#x (%s, lr %#llx)", id, *connected ? "No.1" : "not connected",
                     (unsigned long long)c->x[30]);
         }
     }
-    if (connected) read_input(&buttons, stick);
+    if (*connected) read_input(buttons, stick);
     uint64_t hos_title_input(uint64_t buttons);   /* totk_title.c: the title menu's credits entries */
-    if (connected) buttons = hos_title_input(buttons);
+    if (*connected) *buttons = hos_title_input(*buttons);
     uint64_t hos_frame_step_buttons(uint64_t buttons);   /* nn_vi.c: the frame step of the wheel and quick menus */
-    if (connected) buttons = hos_frame_step_buttons(buttons);
+    if (*connected) *buttons = hos_frame_step_buttons(*buttons);
+}
+static void npad_fill(uint64_t e, int64_t s, uint64_t buttons, const int32_t stick[4], int connected) {
+    memset(GP(e), 0, STATE_SIZE);
+    G64(e) = (uint64_t)s;
+    G64(e + 8) = buttons;
+    memcpy(GP(e + 16), stick, 16);
+    G32(e + 32) = connected ? ATTR_CONNECTED : 0;
+}
+/* GetNpadStates(State* out, int count, unsigned int const& npadId): the latest state first */
+static void npad_states(Ctx *c) {
+    uint64_t out = ARG(0);
+    int count = (int)ARG(1);
+    uint32_t id = G32(ARG(2));
+    uint64_t buttons;
+    int32_t stick[4];
+    int connected;
+    npad_poll(c, id, &buttons, stick, &connected);
     int64_t s = ++sampling;
-    for (int i = 0; i < count; i++) {
-        uint64_t e = out + (uint64_t)i * STATE_SIZE;
-        memset(GP(e), 0, STATE_SIZE);
-        G64(e) = (uint64_t)(s - i);
-        G64(e + 8) = buttons;
-        memcpy(GP(e + 16), stick, 16);
-        G32(e + 32) = connected ? ATTR_CONNECTED : 0;
-    }
+    for (int i = 0; i < count; i++) npad_fill(out + (uint64_t)i * STATE_SIZE, s - i, buttons, stick, connected);
     RET(count);
 }
 HLE(_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj) { npad_states(c); }
+/* GetNpadState(State* out, unsigned int const& npadId): the current state, one entry (Pokopia's input path) */
+static void npad_state(Ctx *c) {
+    uint64_t buttons;
+    int32_t stick[4];
+    int connected;
+    npad_poll(c, G32(ARG(1)), &buttons, stick, &connected);
+    npad_fill(ARG(0), ++sampling, buttons, stick, connected);
+}
+HLE(_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj) { npad_state(c); }
+HLE(_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj) { npad_state(c); }
+HLE(_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj) { npad_state(c); }
+HLE(_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj) { npad_state(c); }
+HLE(_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj) { npad_state(c); }
+/* the handheld activation mode is a setting only: the host's one controller answers in every mode */
+static uint32_t hh_mode;
+HLE(_ZN2nn3hid29SetNpadHandheldActivationModeENS0_26NpadHandheldActivationModeE) { hh_mode = (uint32_t)ARG(0); RET(0); }
+HLE(_ZN2nn3hid29GetNpadHandheldActivationModeEv) { RET(hh_mode); }
 HLE(_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj) { npad_states(c); }
 HLE(_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj) { npad_states(c); }
 HLE(_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj) { npad_states(c); }
@@ -629,6 +660,7 @@ HLE(_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE) {}
 HLE(_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm) {}
 HLE(_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE) {}
 HLE(_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE) {}
+HLE(_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE) {}
 
 /* ShowControllerSupport(ControllerSupportResultInfo*, ControllerSupportArg const&) -> Result: one player, No.1 */
 HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE) {
@@ -742,6 +774,32 @@ HLE(_ZN2nn3hid6detail21EnqueueVibrationValueERKNS0_21VibrationDeviceHandleERKNS0
     RET(0);
 }
 HLE(_ZN2nn3hid6detail28FlushEnqueuedVibrationValuesEv) { RET(0); }
+/* the public form newer SDKs call: same answer as detail::GetVibrationDeviceInfo */
+HLE(_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE) {
+    G32(ARG(0)) = 1;
+    G32(ARG(0) + 4) = ((G32(ARG(1)) >> 16) & 1) + 1;
+    RET(0);
+}
+
+/* ---- Nmouse / Jcms (Switch 2 pointer devices): no such device on the host ----------------------
+   (Pokopia initializes both at boot. nxnative's answers for the same game: no handles, the merged
+   handle exists with no states, and the game skips its mouse code on those answers.) */
+HLE(_ZN2nn3hid16InitializeNmouseEPvmii) {}
+HLE(_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE) {}
+HLE(_ZN2nn3hid14FinalizeNmouseEv) {}
+HLE(_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE) { RET(0); }
+HLE(_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE) { G64(ARG(0)) = 0; RET(1); }
+HLE(_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE) { G32(ARG(0)) = 0; RET(1); }
+HLE(_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE) { G32(ARG(0)) = 0; RET(1); }
+HLE(_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij) { RET(0); }
+HLE(_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE) { RET(0); }
+HLE(_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE) { RET(0); }
+HLE(_ZN2nn3hid14InitializeJcmsEPvm) {}
+HLE(_ZN2nn3hid12FinalizeJcmsEv) {}
+HLE(_ZN2nn3hid13GetJcmsHandleERKjRKNS0_8JcmsTypeE) { RET((uint32_t)(G32(ARG(0)) & 0xff) | ((G32(ARG(1)) & 0xff) << 8)); }
+HLE(_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE) { RET(0); }
+HLE(_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE) { RET(0); }
+HLE(_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE) { RET(0); }
 
 /* ---- (mkw-recomp) the touch screen: none touched. GetTouchScreenStates<16>(TouchScreenState<16>*, int count) ->
    states written: one, with no touches (the lifted SDK version read the touch screen's shared memory, which this
@@ -753,4 +811,49 @@ HLE(_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi) {
     memset(GP(ARG(0)), 0, 16 + 16 * 0x28);
     G64(ARG(0)) = (uint64_t)InterlockedIncrement64(&sampling);
     RET(1);
+}
+
+/* ---- (hookshot) the streamplay HID shared memory (Switch 2's pad path) ------------------------
+   Pokopia's SDK reads pad state from the stpl:u GetHidSharedMemory block through
+   nn::streamplay::detail::HidSharedMemoryAccessor, not nn::hid calls: guest 0's pad type 0 slot
+   (shm + 0*0x24000 + 0*0xC000) gets a FullKey style and a 33-entry ring at +0x28. The ring's entry
+   is 0x38 bytes {u64, u64, seqlock @+0x10, head[0x20] @+0x18}; a record's tail {rx, ry, attr, rsv}
+   sits in the NEXT slot's +0x0..0x10, so the reader's 0x30-byte copy at +0x18 yields
+   {unk, sampling, buttons, lx, ly, rx, ry, attr, rsv} = GuestPadState{u64, NpadFullKeyState}.
+   Layout decoded from the sdk readers (GetGuestPadStyleSet sdk+0x6b1b04, GetGuestPadStates
+   sdk+0x6b1dc0, ring reader sdk+0x6b2760). */
+#define SHM_PAD_STRIDE 0x24000
+#define SHM_GUEST_STRIDE 0xC000
+#define SHM_RING_OFF 0x28
+#define SHM_RING_SLOTS 33
+#define SHM_ENTRY_SIZE 0x38
+static uint64_t shm_seq;
+void nn_hid_shm_sample(void) {
+    uint8_t *shm = hos_streamplay_shm();
+    if (!shm) return;
+    uint8_t *base = shm;                                     /* guest 0, pad type 0 */
+    *(uint32_t *)(base + 0) = 1;                             /* NpadStyleSet: FullKey (every frame: the
+                                                                 pointer moves from the object buffer to the
+                                                                 guest's mapping once the client maps it) */
+    uint64_t buttons;
+    int32_t stick[4];
+    read_input(&buttons, stick);
+    const uint64_t n = ++shm_seq;
+    const int slot = (int)(n % SHM_RING_SLOTS);
+    uint8_t *ring = base + SHM_RING_OFF;
+    uint8_t *e = ring + slot * SHM_ENTRY_SIZE;
+    *(uint64_t *)(e + 0x10) = 2 * n - 1;                     /* seqlock: odd while writing */
+    *(uint64_t *)(e + 0x18) = n;                             /* GuestPadState leading word */
+    *(uint64_t *)(e + 0x20) = n;                             /* NpadFullKeyState.sampling_number */
+    *(uint64_t *)(e + 0x28) = buttons;                       /* NpadButton bits */
+    *(int32_t *)(e + 0x30) = stick[0];                       /* lx */
+    *(int32_t *)(e + 0x34) = stick[1];                       /* ly */
+    uint8_t *t = ring + ((slot + 1) % SHM_RING_SLOTS) * SHM_ENTRY_SIZE;
+    *(int32_t *)(t + 0x00) = stick[2];                       /* rx */
+    *(int32_t *)(t + 0x04) = stick[3];                       /* ry */
+    *(uint32_t *)(t + 0x08) = 1;                             /* attributes: connected */
+    *(uint32_t *)(t + 0x0C) = 0;
+    *(uint64_t *)(e + 0x10) = 2 * n;                         /* seqlock: even, stable */
+    *(uint64_t *)(ring + 0x00) = n - 1;                      /* newest seq - 1 (reader adds 1) */
+    *(uint64_t *)(ring + 0x08) = n < SHM_RING_SLOTS ? n : SHM_RING_SLOTS;
 }

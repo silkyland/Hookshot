@@ -75,10 +75,13 @@ typedef struct {
     const nvn_pool *pool; int64_t off;
     uint64_t serial;                      /* one per initialization: the game copies texture objects by value */
 } nvn_tex;
-/* TOTK reserves 16 bytes for a view on its stack (main+0x823398): packed */
+/* TOTK reserves 16 bytes for a view on its stack (main+0x823398): packed. ds_mode is the Switch 2 SDK's
+   depth-stencil mode (NVN_TEXTURE_DEPTH_STENCIL_MODE_*): which plane a depth-stencil texture samples as.
+   pad1/pad0 bits are ours — the guest never reads them back through this struct. */
 typedef struct {
-    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, pad0 : 3;
-    uint8_t base_level, nlevels, target; uint16_t min_layer, nlayers; uint16_t format; uint8_t swz[4]; uint8_t pad1[2];
+    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, set_ds : 1, pad0 : 2;
+    uint8_t base_level, nlevels, target; uint16_t min_layer, nlayers; uint16_t format; uint8_t swz[4];
+    uint8_t ds_mode, pad1;
 } nvn_view;
 _Static_assert(sizeof(nvn_view) == 16, "NVNtextureView is 16 bytes in TOTK's NVN");
 
@@ -153,6 +156,7 @@ enum {
     NOP_WAIT_EVENT,                             /* (mkw-recomp: a wait for an event another queue's work signals) */
     NOP_PUSH_CONST,                             /* (hookshot: nvnCommandBufferPushComputeConstants) */
     NOP_CLEAR_BUF,                              /* (hookshot: nvnCommandBufferClearBuffer) */
+    NOP_FENCE_SYNC,                             /* (pokopia: nvnCommandBufferFenceSync — signals an nvn_sync mid-stream) */
     NOP_COUNT_
 };
 typedef struct { int32_t n; const nvn_tex *color[8]; nvn_view cview[8]; uint8_t has_cview[8]; const nvn_tex *depth; nvn_view dview; uint8_t has_dview; } nvn_p_set_rt;
@@ -194,6 +198,7 @@ typedef struct { uint64_t dst, size; /* data follows */ } nvn_p_update_ub;
 typedef struct { uint32_t offset, size; /* data follows */ } nvn_p_push_const;
 /* (hookshot) a buffer range filled with a 32-bit value */
 typedef struct { uint64_t dst, size; uint32_t value, pad; } nvn_p_clear_buf;
+typedef struct { uint64_t sync; } nvn_p_fence_sync;   /* guest address of the nvn_sync to signal here */
 typedef struct { int32_t enable, index; } nvn_p_restart;
 /* (mkw-recomp) indirect draws: up to max draws of `stride`-byte arguments at `indirect` (indexed: count, instances,
    first index, base vertex, base instance; arrays: count, instances, first, base instance), as many as the 32-bit

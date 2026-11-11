@@ -41,6 +41,11 @@ uint64_t hos_space_end;
 #define GUEST_SPACE HOS_GUEST_SPACE
 #endif
 #define IMAGE_BASE hos_image_base   /* (the lift's: Eden's layout) */
+static uint64_t guest_window;   /* (android) the rung of the GUEST_SPACE budget the kernel let the window have */
+/* (android) the actual window's end, for the win32_posix copies (the game's and hookshot_vk's) to bound the guest
+   window by; 0 until reserve_guest picks a size, 0 forever on the desktop */
+volatile uint64_t hos_posix_guest_hi;
+uint64_t hos_guest_size(void);
 
 #ifdef _WIN32
 static void no_power_throttling(void) {
@@ -58,6 +63,12 @@ static void no_power_throttling(void) {
 #endif
 
 int hos_game_is_mkw(void) { return !strcmp(hos_main_build_id, "d00e4f399e411d0613aa8d26b1c02fef"); }
+/* The supported titles, by main module build id (nx2/titles/ has the matching table for the build side). */
+int hos_game_title(void) {
+    if (!strncmp(hos_main_build_id, "e0f3ccfa", 8)) return HOS_TITLE_OOT;
+    if (!strncmp(hos_main_build_id, "76a489f3", 8)) return HOS_TITLE_POKOPIA;
+    return HOS_TITLE_OTHER;
+}
 
 /* gen/hos_image.c (build.py lift) */
 extern const uint64_t hos_main_stack_size;
@@ -129,20 +140,70 @@ static int reserve_guest(void) {
        step: MAP_NORESERVE). Decommitting is madvise (host/posix/win32_posix.c VirtualFree): the pages read as zero. */
     void hos_commit_init(void);
     hos_commit_init();   /* (the crash report) */
-    if (mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) != (void *)A64_HOST_BASE)
+    int ok = 0;
+#ifdef __ANDROID__
+    /* Android's user VA for a fixed map tops out under ~512 GB less what the kernel already keeps there, which
+       varies by device: the compile-time window is a budget — take the largest rung that maps at A64_HOST_BASE
+       (win32_posix.c reads the actual end back from hos_posix_guest_hi for VirtualQuery/VirtualAlloc). */
+    for (uint64_t s = GUEST_SPACE; s >= (40ULL << 30) && !ok; s -= s > (160ULL << 30) ? (32ULL << 30) : (16ULL << 30)) {
+        ok = mmap((void *)A64_HOST_BASE, s, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) == (void *)A64_HOST_BASE;
+        if (ok) {
+            guest_window = s;
+            hos_posix_guest_hi = A64_HOST_BASE + s;
+            hos_log("mem: guest window %llu GB of the %llu GB budget", (unsigned long long)(s >> 30),
+                    (unsigned long long)(GUEST_SPACE >> 30));
+        }
+    }
+#else
+    ok = mmap((void *)A64_HOST_BASE, GUEST_SPACE, PROT_READ | PROT_WRITE,
+              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0) == (void *)A64_HOST_BASE;
+#endif
+    if (!ok) {
+        fprintf(stderr, "guest window: mmap(%p, %#llx) -> %d (%s)\n", (void *)A64_HOST_BASE,
+                (unsigned long long)GUEST_SPACE, errno, strerror(errno));
+#ifdef __ANDROID__
+        /* what the kernel has above the window's base (why no rung fit) */
+        FILE *mf = fopen("/proc/self/maps", "r");
+        char mline[512];
+        while (mf && fgets(mline, sizeof mline, mf)) {
+            unsigned long mlo, mhi;
+            if (sscanf(mline, "%lx-%lx", &mlo, &mhi) == 2 && mhi > A64_HOST_BASE)
+                fprintf(stderr, "maps: %s", mline);
+        }
+        if (mf) fclose(mf);
+        /* how high can a user-specified (fixed) map go, and how big can kernel-chosen maps get? */
+        static const uint64_t gbases[] = {512, 640, 768, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072};
+        for (int i = 0; i < 11; i++) {
+            errno = 0;
+            void *p = mmap((void *)(gbases[i] << 30), 1 << 16, PROT_READ,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE, -1, 0);
+            fprintf(stderr, "fixed %lluGB -> %s (%d)\n", (unsigned long long)gbases[i],
+                    p == MAP_FAILED ? "FAIL" : "OK", errno);
+            if (p != MAP_FAILED) munmap(p, 1 << 16);
+        }
+        static const uint64_t gsizes[] = {256, 128, 64, 32, 16};
+        for (int i = 0; i < 5; i++) {
+            errno = 0;
+            void *p = mmap(NULL, gsizes[i] << 30, PROT_READ,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            fprintf(stderr, "any %lluGB -> %p (%d)\n", (unsigned long long)gsizes[i], p, errno);
+            if (p != MAP_FAILED) munmap(p, gsizes[i] << 30);
+        }
+#endif
         return 0;
+    }
     /* (issue 312) no transparent huge pages in the guest window: the renderer imports its pools as userptr memory, and every
        collapse khugepaged makes in them changes their mappings, which the kernel answers by pinning the pages again at the
        next submission: ~250 ms a submit on RADV while the GPU sat idle. HOS_THP=1: as before */
-    if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, GUEST_SPACE, MADV_NOHUGEPAGE);
+    if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, hos_guest_size(), MADV_NOHUGEPAGE);
     return 1;
 #endif
 }
 
 /* The guest window, for the renderer (gpu/render/rx_buffer.cpp). */
 uint8_t *hos_guest_base(void) { return A64_MEM; }
-uint64_t hos_guest_size(void) { return GUEST_SPACE; }
+uint64_t hos_guest_size(void) { return guest_window ? guest_window : GUEST_SPACE; }
 
 /* Call guest code at `addr` as a fresh call from the top of the main thread's stack, with whatever arguments the
    caller put in x0-x7 (call_guest clears x0 and x1 first; call_guest_args keeps them). */
@@ -272,11 +333,7 @@ static const char *saves_dir(const char *beside) {
 /* hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the
    switches players are asked to test (RX_VK_NOOPT and the rest). Lines starting with # are notes. On Linux this runs
    before the window, so HOS_HEADLESS and HOS_WINDOW_SIZE are already set when the window is made. */
-static void load_hookshot_env(void) {
-    char path[MAX_PATH + 32];
-    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-    while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
-    memcpy(path + n, "hookshot_env.txt", 17);
+void hos_env_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[512];
@@ -296,6 +353,18 @@ static void load_hookshot_env(void) {
 #endif
     }
     fclose(f);
+}
+
+static void load_hookshot_env(void) {
+    char path[MAX_PATH + 32];
+    const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
+    if (data && *data) snprintf(path, sizeof path, "%s/hookshot_env.txt", data);
+    else {
+        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+        while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
+        memcpy(path + n, "hookshot_env.txt", 17);
+    }
+    hos_env_file(path);
 }
 
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
@@ -405,7 +474,7 @@ static int game_main(int argc, char **argv) {
     const long long file_size = _ftelli64(f);
     fseek(f, 0, SEEK_SET);
     if (file_size > 0) hos_commit(IMAGE_BASE, (uint64_t)file_size);
-    size_t n = file_size > 0 && (uint64_t)file_size <= GUEST_SPACE - IMAGE_BASE
+    size_t n = file_size > 0 && (uint64_t)file_size <= hos_guest_size() - IMAGE_BASE
                    ? fread(A64_MEM + IMAGE_BASE, 1, (size_t)file_size, f) : 0;
     fclose(f);
 #endif
@@ -415,9 +484,10 @@ static int game_main(int argc, char **argv) {
         return 1;
     }
     hos_mem_init(hos_image_end);
-    {   /* (hookshot) HOS_ASPECT=<ratio> (2.3889 for 3440x1440): the one 16:9 constant in the game's data, read by the camera and the
+    if (hos_game_title() == HOS_TITLE_OOT) {   /* (hookshot) HOS_ASPECT=<ratio> (2.3889 for 3440x1440): the one 16:9 constant in the game's data, read by the camera and the
            scene setup, at the window's shape. The picture stays 16:9 and is stretched to the window, so the 3D keeps its proportions
-           and the HUD stretches with it. */
+           and the HUD stretches with it. OoT's address only: on another title 0x83e6131c is just some word that could
+           coincidentally read ~1.778 and get scribbled. */
         const char *e = getenv("HOS_ASPECT");
         uint8_t *at = (uint8_t *)A64_MEM + 0x83e6131cull;
         float was, want = e ? (float)atof(e) : 0.0f;
@@ -425,17 +495,20 @@ static int game_main(int argc, char **argv) {
         if (!e) {   /* (the Insert menu's Ultrawide, off unless it says 1: the main monitor's shape) */
             int on = 0;
             char path[MAX_PATH];
-            const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-            char *slash = len ? strrchr(path, SEP) : NULL;
-            if (slash) {
-                snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
-                FILE *o = fopen(path, "r");
-                if (o) {
-                    char line[80];
-                    while (fgets(line, sizeof line, o))
-                        if (!strncmp(line, "ultrawide=", 10)) on = atoi(line + 10) != 0;
-                    fclose(o);
-                }
+            const char *data = getenv("HOOKSHOT_ANDROID_DATA");   /* (android: beside the .so is read-only) */
+            if (data && *data) snprintf(path, sizeof path, "%s/hookshot_options.ini", data);
+            else {
+                const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+                char *slash = len ? strrchr(path, SEP) : NULL;
+                if (slash) snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+                else path[0] = 0;
+            }
+            FILE *o = path[0] ? fopen(path, "r") : NULL;
+            if (o) {
+                char line[80];
+                while (fgets(line, sizeof line, o))
+                    if (!strncmp(line, "ultrawide=", 10)) on = atoi(line + 10) != 0;
+                fclose(o);
             }
             const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
             if (on && sh > 0 && (float)sw / (float)sh > 1.8f) want = (float)sw / (float)sh;
@@ -485,6 +558,11 @@ static int game_main(int argc, char **argv) {
     hos_log("nnMain returned");
     return 0;
 }
+
+#if defined(__ANDROID__)
+/* (android) host/android/android_main.c's android_main: the same entry, on the thread android_native_app_glue gave */
+__attribute__((visibility("default"))) int hos_game_main(int argc, char **argv) { return game_main(argc, argv); }
+#endif
 
 #ifndef _WIN32
 /* (linux) The window belongs on the process's main thread (SDL), so the game runs on a thread of its own, with the

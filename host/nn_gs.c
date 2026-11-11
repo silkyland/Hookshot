@@ -36,3 +36,21 @@ HLE(_ZN2nn2gs19TimedWaitNativeSyncERKNS0_16NativeSyncHandleENS_8TimeSpanE) {
     }
     RET(reached);
 }
+
+/* ---- (pokopia) nn::streamplay / nn::vi2 on Switch 2 ---------------------------------------------------------
+   GameShare's per-guest displays go through nn::vi2::sdk and the GPU driver that the native NVN layer replaces.
+   nn::streamplay::CreateIndividualDisplays calls nv::InitCheck and then nn::vi2::Initialize -> nn::vi2::sdk::
+   Initialize, which aborts (svcBreak) without the skipped GPU boot — after the stpl:u GetRequiredMemorySize
+   queries, exactly where Pokopia's startup died. Nobody streams to a guest here, so creating the displays
+   succeeds as a no-op and a guest's native window handle is the host one (pokopia-recomp
+   runtime/src/core/switch2.cpp). */
+HLE(_ZN2nn10streamplay24CreateIndividualDisplaysEi) { RET(0); }
+HLE(_ZN2nn10streamplay21GetNativeWindowHandleENS0_7GuestIdE) {
+    static uint64_t window;
+    if (!window) window = hos_sys_alloc(0x100, 16);
+    RET(window);
+}
+HLE(_ZN2nn3vi210InitializeEv) {}
+HLE(_ZN2nn3vi28FinalizeEv) {}
+HLE(_ZN2nn3vi23sdk10InitializeEv) {}
+HLE(_ZN2nn3vi23sdk8FinalizeEv) {}

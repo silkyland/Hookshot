@@ -18,8 +18,23 @@
 
 /* the guest window (third_party/a64-kit/rt/a64.h A64_HOST_BASE, host/hos.h HOS_GUEST_SPACE): one mapping, all of it
    readable and writable, which VirtualQuery reports as committed without asking the kernel */
-#define GUEST_LO 0x100000000000ULL
-#define GUEST_HI (GUEST_LO + (1ULL << 39))
+#ifndef A64_HOST_BASE
+#define A64_HOST_BASE 0x100000000000ULL   /* (rt/a64.h's own default) */
+#endif
+#ifndef HOS_GUEST_SPACE
+#define HOS_GUEST_SPACE (1ULL << 39)
+#endif
+#define GUEST_LO A64_HOST_BASE
+/* the window's end is a runtime value: an Android build's compile-time size is a budget, of which hos_main.c maps
+   the largest rung the kernel allows and reports the end in the game's exported hos_posix_guest_hi (looked up as
+   hos_posix_keys is: this file is also built into hookshot_vk, which reads the game's copy). With no game-side
+   answer — the desktop build — the whole compile-time window. */
+static uintptr_t guest_hi(void) {
+    static volatile uint64_t *end;
+    static int looked;
+    if (!looked) { looked = 1; end = (volatile uint64_t *)dlsym(RTLD_DEFAULT, "hos_posix_guest_hi"); }
+    return end && *end ? (uintptr_t)*end : GUEST_LO + HOS_GUEST_SPACE;
+}
 
 /* ---- errors ---- */
 static __thread DWORD last_error;
@@ -565,33 +580,66 @@ void *GetCurrentFiber(void) { return cur_fiber; }
 void *GetFiberData(void) { return cur_fiber ? cur_fiber->param : NULL; }
 
 /* ---- processors ---- */
-static int read_int(const char *path) {
+static ULONG_PTR read_cpu_list(const char *path) {
     FILE *f = fopen(path, "r");
-    int v = -1;
-    if (f) {
-        if (fscanf(f, "%d", &v) != 1) v = -1;
-        fclose(f);
+    if (!f) return 0;
+    char line[512];
+    const int read = fgets(line, sizeof line, f) != NULL;
+    fclose(f);
+    if (!read || strlen(line) == sizeof line - 1) return 0;
+    ULONG_PTR mask = 0;
+    char *p = line;
+    for (;;) {
+        if (*p < '0' || *p > '9') return 0;
+        char *end;
+        unsigned long first = strtoul(p, &end, 10), last = first;
+        if (first >= 64) return 0;
+        p = end;
+        if (*p == '-') {
+            p++;
+            if (*p < '0' || *p > '9') return 0;
+            last = strtoul(p, &end, 10);
+            if (last < first || last >= 64) return 0;
+            p = end;
+        }
+        for (unsigned long cpu = first; cpu <= last; cpu++) mask |= (ULONG_PTR)1 << cpu;
+        if (*p == ',') { p++; continue; }
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        return *p ? 0 : mask;
     }
-    return v;
 }
 BOOL GetLogicalProcessorInformation(SYSTEM_LOGICAL_PROCESSOR_INFORMATION *info, DWORD *len) {
-    /* one RelationProcessorCore entry per physical core, its logical processors (SMT siblings) in the mask */
-    int core_of[64], pkg_of[64], n = 0;
+    /* Kernel sibling maps identify physical cores directly. ARM core_id values can repeat across clusters
+       within one package: grouping by (package_id, core_id) merged separate cores on Snapdragon and made
+       hos_reserved_cpus() reserve CPUs 0,3,7 instead of CPU7 alone. */
+    int n = 0;
     long cpus = sysconf(_SC_NPROCESSORS_CONF);
+    if (cpus <= 0) { last_error = ERROR_INVALID_PARAMETER; return FALSE; }
     if (cpus > 64) cpus = 64;
     ULONG_PTR masks[64];
-    int keys[64][2];
+    const ULONG_PTR possible = cpus == 64 ? ~(ULONG_PTR)0 : ((ULONG_PTR)1 << cpus) - 1;
+    ULONG_PTR seen = 0;
     for (int i = 0; i < cpus; i++) {
         char p[128];
-        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
-        core_of[i] = read_int(p);
-        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", i);
-        pkg_of[i] = read_int(p);
-        if (core_of[i] < 0) core_of[i] = i, pkg_of[i] = 0;
+        snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/core_cpus_list", i);
+        ULONG_PTR mask = read_cpu_list(p);
+        if (!mask) {
+            snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", i);
+            mask = read_cpu_list(p);
+        }
+        /* An incomplete or contradictory map must not invent siblings or reserve unrelated CPUs. The caller
+           can continue without affinity pinning when topology is unavailable. */
+        if (!(mask & ((ULONG_PTR)1 << i)) || (mask & ~possible)) {
+            last_error = ERROR_INVALID_PARAMETER;
+            return FALSE;
+        }
         int k = 0;
-        while (k < n && (keys[k][0] != pkg_of[i] || keys[k][1] != core_of[i])) k++;
-        if (k == n) keys[n][0] = pkg_of[i], keys[n][1] = core_of[i], masks[n] = 0, n++;
-        masks[k] |= (ULONG_PTR)1 << i;
+        while (k < n && masks[k] != mask) k++;
+        if (k == n) {
+            if (mask & seen) { last_error = ERROR_INVALID_PARAMETER; return FALSE; }
+            masks[n++] = mask;
+            seen |= mask;
+        }
     }
     const DWORD need = (DWORD)(n * sizeof *info);
     if (*len < need) { *len = need; last_error = 122; return FALSE; }
@@ -640,7 +688,7 @@ void *VirtualAlloc(void *addr, SIZE_T size, DWORD type, DWORD protect) {
     }
     if (addr && (type & MEM_COMMIT) && !(type & MEM_RESERVE)) {
         /* (inside a reservation: made accessible; the guest window is accessible already) */
-        if ((uintptr_t)addr >= GUEST_LO && (uintptr_t)addr + size <= GUEST_HI) return addr;
+        if ((uintptr_t)addr >= GUEST_LO && (uintptr_t)addr + size <= guest_hi()) return addr;
         const uintptr_t lo = (uintptr_t)addr & ~(page - 1), hi = ((uintptr_t)addr + size + page - 1) & ~(page - 1);
         if (mprotect((void *)lo, hi - lo, prot_of(protect))) { fail_errno(); return NULL; }
         return addr;
@@ -688,9 +736,9 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
     memset(mbi, 0, sizeof *mbi);
     const uintptr_t a = (uintptr_t)addr, page = a & ~(uintptr_t)4095;
     mbi->BaseAddress = (void *)page;
-    if (a >= GUEST_LO && a < GUEST_HI) {
+    if (a >= GUEST_LO && a < guest_hi()) {
         mbi->AllocationBase = (void *)GUEST_LO;
-        mbi->RegionSize = GUEST_HI - page;
+        mbi->RegionSize = guest_hi() - page;
         mbi->State = MEM_COMMIT, mbi->Protect = mbi->AllocationProtect = PAGE_READWRITE, mbi->Type = 0x20000;
         return sizeof *mbi;
     }
@@ -724,12 +772,23 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
 
 /* ---- modules ---- */
 static void exe_path(char *out, size_t cap) {
+#ifdef __ANDROID__
+    /* (android) /proc/self/exe is the app process, not this library: the directory the game's .so's were loaded
+       from is what the paths beside the executable mean here (rx_backend's hookshot_vk.so, gdi_posix's fonts) */
+    Dl_info di;
+    if (dladdr((void *)&exe_path, &di) && di.dli_fname && realpath(di.dli_fname, out)) return;
+#endif
     const ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     out[n > 0 ? n : 0] = 0;
 }
 /* a Windows library name, as the Linux one: SDL2.dll -> libSDL2-2.0.so.0, vulkan-1.dll -> libvulkan.so.1, x.dll -> x.so */
 static const char *linux_name(const char *base) {
+#ifdef __ANDROID__
+    static const char *map[][2] = {{"sdl2.dll", "libsdl2.so"}, {"vulkan-1.dll", "libvulkan.so"},
+                                   {"hookshot_vk.dll", "libhookshot_vk.so"}};
+#else
     static const char *map[][2] = {{"sdl2.dll", "libSDL2-2.0.so.0"}, {"vulkan-1.dll", "libvulkan.so.1"}};
+#endif
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
         if (!strcasecmp(base, map[i][0])) return map[i][1];
     return NULL;
@@ -786,8 +845,10 @@ DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD cap) {
             snprintf(path, sizeof path, "%s", di.dli_fname);
         if (!path[0]) exe_path(path, sizeof path);
     } else {
+#ifdef RTLD_DI_LINKMAP
         void *lm = NULL;   /* (a handle from LoadLibraryA) */
         if (dlinfo(m, RTLD_DI_LINKMAP, &lm) == 0 && lm) snprintf(path, sizeof path, "%s", ((const char **)lm)[1]);
+#endif
     }
     if (!cap) return 0;
     const size_t n = strlen(path);
@@ -1069,6 +1130,30 @@ static LPTOP_LEVEL_EXCEPTION_FILTER unhandled;
 static struct sigaction previous[32];
 static pthread_mutex_t handlers_mu = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(__aarch64__)
+/* (android) the AAPCS64's mcontext: regs[0..30], sp, pc, pstate. The CONTEXT is still the Windows x64 shape the
+   crash report prints; what fits goes in by position (x0-x15 across the first fields, x16-x30 unused names stay
+   0), Rip = pc, Rsp = sp — enough to read an Android tombstone next to it */
+static void context_from(CONTEXT *c, const ucontext_t *uc) {
+    memset(c, 0, sizeof *c);
+    const uint64_t *r = uc->uc_mcontext.regs;
+    c->Rax = (DWORD64)r[0], c->Rcx = (DWORD64)r[1], c->Rdx = (DWORD64)r[2], c->Rbx = (DWORD64)r[3];
+    c->Rsp = (DWORD64)uc->uc_mcontext.sp, c->Rbp = (DWORD64)r[29];
+    c->Rsi = (DWORD64)r[4], c->Rdi = (DWORD64)r[5];
+    c->R8 = (DWORD64)r[6], c->R9 = (DWORD64)r[7], c->R10 = (DWORD64)r[8], c->R11 = (DWORD64)r[9];
+    c->R12 = (DWORD64)r[10], c->R13 = (DWORD64)r[11], c->R14 = (DWORD64)r[12], c->R15 = (DWORD64)r[13];
+    c->Rip = (DWORD64)uc->uc_mcontext.pc, c->ContextFlags = CONTEXT_FULL;
+}
+static void context_to(ucontext_t *uc, const CONTEXT *c) {
+    uint64_t *r = uc->uc_mcontext.regs;
+    r[0] = (uint64_t)c->Rax, r[1] = (uint64_t)c->Rcx, r[2] = (uint64_t)c->Rdx, r[3] = (uint64_t)c->Rbx;
+    uc->uc_mcontext.sp = (uint64_t)c->Rsp, r[29] = (uint64_t)c->Rbp;
+    r[4] = (uint64_t)c->Rsi, r[5] = (uint64_t)c->Rdi;
+    r[6] = (uint64_t)c->R8, r[7] = (uint64_t)c->R9, r[8] = (uint64_t)c->R10, r[9] = (uint64_t)c->R11;
+    r[10] = (uint64_t)c->R12, r[11] = (uint64_t)c->R13, r[12] = (uint64_t)c->R14, r[13] = (uint64_t)c->R15;
+    uc->uc_mcontext.pc = (uint64_t)c->Rip;
+}
+#else
 static void context_from(CONTEXT *c, const ucontext_t *uc) {
     const greg_t *g = uc->uc_mcontext.gregs;
     c->Rax = (DWORD64)g[REG_RAX], c->Rcx = (DWORD64)g[REG_RCX], c->Rdx = (DWORD64)g[REG_RDX], c->Rbx = (DWORD64)g[REG_RBX];
@@ -1085,6 +1170,7 @@ static void context_to(ucontext_t *uc, const CONTEXT *c) {
     g[REG_R12] = (greg_t)c->R12, g[REG_R13] = (greg_t)c->R13, g[REG_R14] = (greg_t)c->R14, g[REG_R15] = (greg_t)c->R15;
     g[REG_RIP] = (greg_t)c->Rip;
 }
+#endif
 static void on_signal(int sig, siginfo_t *si, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     EXCEPTION_RECORD rec;
@@ -1096,9 +1182,15 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
                       : sig == SIGFPE ? EXCEPTION_INT_DIVIDE_BY_ZERO : EXCEPTION_BREAKPOINT;
     rec.ExceptionAddress = (void *)(uintptr_t)ctx.Rip;
     if (sig == SIGSEGV || sig == SIGBUS) {
+#ifdef __aarch64__
+        rec.NumberParameters = 2;
+        rec.ExceptionInformation[0] = 0;   /* (aarch64: the ESR's fault kind is not read here) */
+        rec.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
+#else
         rec.NumberParameters = 2;
         rec.ExceptionInformation[0] = (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;   /* (1: a write) */
         rec.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
+#endif
     }
     EXCEPTION_POINTERS ep = {&rec, &ctx};
     for (int i = 0; i < nhandlers; i++)
@@ -1226,6 +1318,7 @@ int MessageBoxA(HWND w, LPCSTR text, LPCSTR caption, UINT type) {
     return 1;
 }
 
+#ifndef __ANDROID__   /* (android: host/android/android_audio.c's AAudio instead) */
 /* ---- waveOut on SDL's audio: a callback takes the written blocks in order and marks them done ---- */
 typedef struct {
     int freq;
@@ -1324,3 +1417,5 @@ MMRESULT waveOutReset(HWAVEOUT hw) {
     return 0;
 }
 MMRESULT waveOutClose(HWAVEOUT hw) { waveOutReset(hw); return 0; }
+
+#endif /* !__ANDROID__ (waveOut) */

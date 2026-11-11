@@ -18,6 +18,12 @@
 #include <x86intrin.h>
 #define HOOKSHOT_RDTSC() ((uint64_t)__rdtsc())
 #define HOOKSHOT_PAUSE() _mm_pause()
+#elif defined(__aarch64__)
+#define HOOKSHOT_RDTSC() ({ uint64_t _v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(_v)); _v; })
+#define HOOKSHOT_PAUSE() __asm__ volatile("yield" ::: "memory")
+#else
+#define HOOKSHOT_RDTSC() 0
+#define HOOKSHOT_PAUSE() ((void)0)
 #endif
 
 typedef struct VmaAllocation_T* VmaAllocation;   // (vk_mem_alloc.h's handle)
@@ -168,6 +174,10 @@ void memory_drop_shadow(uint64_t guest, uint64_t size);   // (a write the captur
 /// (EvilBoyce) the newest submission value whose write-back reaches into [guest, guest + size) (0: none ever); *ever set
 /// when any write-back ever did
 uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever);
+// (mirrors_only) staged write-backs: the largest submission value whose runs touch [p, p+n), and the completed
+// submissions' runs memcpy'd into guest memory (vk_replay.cpp's waits call these)
+uint64_t memory_writebacks_pending(const void* p, uint64_t n);
+void memory_writebacks_drain(uint64_t done);
 uint32_t memory_generation();
 /// 1: a page of [guest, guest + size) was written after generation gen; 0: none was
 bool memory_written_since(uint64_t guest, uint64_t size, uint32_t gen);

@@ -34,3 +34,19 @@ __pycache__/
 # ---- Linux builds ----
 build-linux/
 *.so
+
+# ---- android build output ----
+android-app/.gradle/
+android-app/app/build/
+android-app/build/
+android-app/local.properties
+android-app/app/src/main/jniLibs/
+build-android/
+
+# ---- pokopia android build output ----
+build-android-pokopia/
+android-app-pokopia/.gradle/
+android-app-pokopia/app/build/
+android-app-pokopia/build/
+android-app-pokopia/local.properties
+android-app-pokopia/app/src/main/jniLibs/

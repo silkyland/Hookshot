@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.hookshot.diagnostics">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <application android:label="Hookshot Diagnostics" android:debuggable="true"
+        android:extractNativeLibs="true" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".ProbeActivity" android:exported="true" android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

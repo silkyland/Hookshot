@@ -27,6 +27,8 @@ public final class ControllerOverlay extends FrameLayout {
     private Button toggle;
     private int insetLeft, insetTop, insetRight, insetBottom;
     private boolean active = true;
+    private int layoutWidth = -1, layoutHeight = -1;
+    private boolean layoutDirty = true;
 
     public ControllerOverlay(Context context, Sink sink) {
         super(context);
@@ -37,14 +39,23 @@ public final class ControllerOverlay extends FrameLayout {
             android.graphics.Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
             if (insetLeft != i.left || insetTop != i.top || insetRight != i.right || insetBottom != i.bottom) {
                 insetLeft = i.left; insetTop = i.top; insetRight = i.right; insetBottom = i.bottom;
-                rebuild();
+                layoutDirty = true;
+                requestLayout();
             }
             return insets;
         });
     }
     public ControllerModel model() { return model; }
     private float dp() { return getResources().getDisplayMetrics().density; }
-    @Override protected void onSizeChanged(int w, int h, int oldW, int oldH) { rebuild(); }
+    @Override protected void onMeasure(int widthSpec, int heightSpec) {
+        int width = MeasureSpec.getSize(widthSpec), height = MeasureSpec.getSize(heightSpec);
+        if (width > 0 && height > 0 && (layoutDirty || width != layoutWidth || height != layoutHeight)) {
+            layoutWidth = width; layoutHeight = height; layoutDirty = false;
+            // Children must exist before FrameLayout measures them. onSizeChanged runs after measurement.
+            rebuild(width, height);
+        }
+        super.onMeasure(widthSpec, heightSpec);
+    }
     private void publish() {
         ControllerModel.State s = model.state();
         if (!active) { s.buttons = 0; java.util.Arrays.fill(s.axes, 0); s.enabled = false; }
@@ -56,9 +67,8 @@ public final class ControllerOverlay extends FrameLayout {
     }
     public void setActive(boolean on) { active = on; model.releaseAll(); publish(); }
     public void releaseAll() { model.releaseAll(); publish(); }
-    private void rebuild() {
-        if (getWidth() == 0 || getHeight() == 0) return;
-        model.layout(getWidth(), getHeight(), dp(), insetLeft, insetTop, insetRight, insetBottom);
+    private void rebuild(int width, int height) {
+        model.layout(width, height, dp(), insetLeft, insetTop, insetRight, insetBottom);
         removeAllViews();
         pads.clear();
         for (ControllerModel.Control c : model.controls()) {
